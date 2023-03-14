@@ -1,3 +1,5 @@
+# Forked from https://github.com/Bobberty/MTASTS-EXIM-PERL
+
 # MTASTS-EXIM-PERL
 ## Perl script designed to be used by Exim for RFC 8461 MTA-STS compliance.
 
