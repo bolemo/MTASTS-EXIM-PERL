@@ -5,6 +5,7 @@ from collections import defaultdict
 
 import argparse
 import lmdb
+import dns.resolver
 import io
 import gzip
 import re
@@ -15,6 +16,89 @@ import email.mime.text
 import email.mime.application
 import smtplib
 import requests
+
+def warn(msg):
+    print(msg, file=sys.stderr)
+    return
+
+# initialize the fields of out tlsrpt data
+tlsrpt_struct = lambda: dict(
+    id=None,
+    domain=None,
+    policy='not stored',
+    policy_type='sts',
+    mode=None,
+    mx=[],
+    report=None,
+    expire=None,
+    needsreport=False,
+    deliveries=[],
+    errors=[],
+)
+tlsrpt_data = defaultdict(tlsrpt_struct)
+
+# resolve a given qname+rdtype and return a set of resource records or an empty set on error
+def dns_resolve_rrset(qname, rdtype):
+    try:
+        answer = dns.resolver.resolve(qname, rdtype, search=False)
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        return set()
+    return { rr.to_text() for rr in answer }
+
+# returns rua value of domain's DNS TLSRPT record or None if no such record found
+def get_tlsrpt_rua(domain):
+    for record in dns_resolve_rrset('_smtp._tls.%s' % domain, 'TXT'):
+        # record='"v=TLSRPTv1; rua=email@domain.tld"'
+        if not record.startswith('"v=TLSRPTv1;'):
+            continue
+        tlsrpt = record[12:-1].strip()
+        if re.match('.*[ ;]', tlsrpt):
+            warn('Illegal TLSRPT record: %s' % record)
+            continue
+        # "rua=..."
+        return tlsrpt[4:]
+    return None
+
+# returns a dict of mx: tlsa_rrset of domain for all MX with valid TLSA records
+def get_tlsa_mx(domain):
+    tlsa_mx = {}
+    for mx_record in dns_resolve_rrset(domain, 'MX'):
+        prio, mx = mx_record.split()
+        tlsa = [
+            '_25._tcp.%s IN TLSA %s' % (mx, tlsa_record)
+            for tlsa_record in dns_resolve_rrset('_25._tcp.%s' % mx, 'TLSA')
+        ]
+        if not len(tlsa):
+            continue
+        # remove trailing '.' from mx to allow matching in mail logs
+        while mx.endswith('.'):
+            mx = mx[:-1]
+        tlsa_mx[mx] = ';'.join(tlsa)
+    return tlsa_mx
+
+# generate tlsrpt struct for a non-MTA-STS domain
+def non_mtasts_domain(domain):
+    tlsrpt = tlsrpt_struct()
+    tlsrpt.update(dict(
+        domain = domain,
+        policy = 'no-policy-found',
+        policy_type = 'no-policy-found',
+    ))
+    rua = get_tlsrpt_rua(domain)
+    if rua is None:
+        # no TLSRPT record: none policy
+        tlsrpt['policy_type'] = 'none'
+        return tlsrpt
+    tlsrpt['report'] = rua
+    tlsa_mx = get_tlsa_mx(domain)
+    if len(tlsa_mx) > 0:
+        # TLSA records found, DANE in use
+        tlsrpt.update(dict(
+            policy_type = 'tlsa',
+            policy = ';'.join(tlsa_mx.values()),
+            mx = list(tlsa_mx.keys()),
+        ))
+    return tlsrpt
 
 # convert a datetime object from local time to UTC
 # inspired by
@@ -50,16 +134,18 @@ def utc2localtz(dt):
     # return datetime object adjusted by computed offset
     return dt + offset
 
-def exim_error2mtasts_error(error):
+def exim_error2tlsrpt_error(error):
     errors = {
+        # https://easydmarc.com/blog/de/simple-mail-transfer-protocol-smtp-tls-berichterstattung/
         'a TLS session is required, but the server did not offer TLS support': 'starttls-not-supported',
         # unfortunately exim always reports 'certificate invalid'
         # and does not report if the cert has a host mismatch, expiry or trust issue
         'TLS session: (certificate verification failed): certificate invalid': 'validation-failure',
+        'TLS session: (certificate verification failed): Verification failed. The certificate differs.': 'validation-failure',
     }
     if error in errors:
         return errors[error]
-    print('Unknown error string "%s"!' % error, file=sys.stderr)
+    warn('Unknown error string "%s"!' % error)
     return 'validation-failure'
 
 def parse_exim_errors(lines):
@@ -69,30 +155,37 @@ def parse_exim_errors(lines):
     for line in lines:
         error_match = re.match(error_re, line)
         if not error_match:
-            print('Failed to match error line against "%s":\n%s' % (error_re, line), file=sys.stderr)
+            warn('Failed to match error line against "%s":\n%s' % (error_re, line))
             continue
         email  = error_match.group('email')
         mxhost = error_match.group('mxhost')
         mxip   = error_match.group('mxip')
         lip    = error_match.group('lip')
         error  = error_match.group('error')
-        result_type = exim_error2mtasts_error(error)
+        result_type = exim_error2tlsrpt_error(error)
         key = (result_type, lip, mxip, mxhost)
         errors[key] += 1
-    def key_count2mtasts_details(key, count):
-        return {
+    return [
+        {
             "result-type":           key[0],
             "sending-mta-ip":        key[1],
             "receiving-ip":          key[2],
             "receiving-mx-hostname": key[3],
             "failed-session-count":  int(count),
         }
-    return [
-        key_count2mtasts_details(key, count)
         for key, count in errors.items()
     ]
 
-def gen_report(mtasts):
+def gen_report(tlsrpt):
+    policy = {
+        "policy-type": tlsrpt['policy_type'],
+        "policy-domain": tlsrpt['domain'],
+    }
+    if tlsrpt['policy_type'] in ['sts', 'tlsa']:
+        policy.update({
+            "policy-string": tlsrpt['policy'].strip().split('\n'),
+            "mx-host":       tlsrpt['mx'],
+        })
     report = {
         "organization-name": args.org_name,
         "date-range": {
@@ -102,28 +195,23 @@ def gen_report(mtasts):
         "contact-info": args.contact,
         "report-id": "%s@%s" % (
             localtz2utc( datetime.datetime.now() ).strftime('%Y-%m-%dT%H:%M:%SZ'),
-            args.org_name
+            args.org_domain
         ),
         "policies": [
             {
-                "policy": {
-                    "policy-type": "sts",
-                    "policy-string": mtasts['policy'].strip().split('\n'),
-                    "policy-domain": mtasts['domain'],
-                    "mx-host": mtasts['mx'].split(':'),
-                },
+                "policy": policy,
                 "summary": {
-                    "total-successful-session-count": len(mtasts['deliveries']),
-                    "total-failure-session-count": len(mtasts['errors']),
+                    "total-successful-session-count": len(tlsrpt['deliveries']),
+                    "total-failure-session-count": len(tlsrpt['errors']),
                 },
             },
         ],
     }
-    if len(mtasts['errors']) > 0:
-        report['policies'][0]['failure-details'] = parse_exim_errors(mtasts['errors'])
+    if len(tlsrpt['errors']) > 0:
+        report['policies'][0]['failure-details'] = parse_exim_errors(tlsrpt['errors'])
     return report
 
-def send_mail(rua, report, fake=True):
+def send_mail(rua, report, fake=False):
     domain = report['policies'][0]['policy']['policy-domain']
     smtp_from = args.contact
     print('Mailing report to %s' % rua)
@@ -135,14 +223,16 @@ def send_mail(rua, report, fake=True):
     msg.set_param('report-type', 'tlsrpt')
     msg['Subject'] = 'Report Domain: %s Submitter: %s Report-ID: <%s>' % (
         domain,
-        args.org_name,
+        args.org_domain,
         report['report-id'],
     )
     msg['To'] = rua
     # XXX:fixme: make this configurable
     msg['From'] = 'SMTP TLS Report by %s <%s>' % (args.org_name, smtp_from)
+    msg['TLS-Report-Domain'] = domain
+    msg['TLS-Report-Submitter'] = args.org_domain
 
-    body  = 'This is an aggregate TLS report from %s\n' % args.org_name
+    body  = 'This is an aggregate TLS report from %s\n' % args.org_domain
     body += '\n'
     body += 'For your convenience:\n'
     body += json.dumps(report, indent=4)
@@ -152,7 +242,7 @@ def send_mail(rua, report, fake=True):
     report_json = json.dumps(report)
     report_gz = gzip.compress(report_json.encode())
     filename = '%s!%s!%s!%s!001.json.gz' % (
-        args.org_name,
+        args.org_domain,
         domain,
         int(starttime.timestamp()),
         int(endtime.timestamp()),
@@ -170,7 +260,7 @@ def send_mail(rua, report, fake=True):
     with smtplib.SMTP(host='localhost') as smtp:
         failed_recipients = smtp.sendmail(smtp_from, smtp_to, msg.as_string())
         if len(failed_recipients) > 0:
-            print('Failed to send mail to: %s' % failed_recipients, file=sys.stderr)
+            warn('Failed to send mail to: %s' % failed_recipients)
     
 def mail_report(rua, report):
     if args.no_mails:
@@ -207,10 +297,10 @@ def post_report(rua, report):
     try:
         response = requests.post(rua, json=report, headers=headers)
     except requests.exceptions.ConnectionError as e:
-        print('POST to "%s" failed with ConnectionError: %s' % (rua, e), file=sys.stderr)
+        warn('POST to "%s" failed with ConnectionError: %s' % (rua, e))
         return
     if not response.ok:
-        print('POST to "%s" failed with %s %s: %s' % (rua, response.status_code, response.reason, response.text), file=sys.stderr)
+        warn('POST to "%s" failed with %s %s: %s' % (rua, response.status_code, response.reason, response.text))
         return
     print(response)
     print(response.content.decode())
@@ -222,8 +312,10 @@ POST to "https://tlsrpt.azurewebsites.net/report" failed with 400 Bad Request: S
 POST to "https://tlsrpt.azurewebsites.net/report" failed with 400 Bad Request: Requests from a same IP address and sender organization are not allowed in 24 hours
 '''
 
-def send_report(mtasts):
-    rua = mtasts['report']
+def send_report(tlsrpt):
+    if tlsrpt['policy_type'] == 'none':
+        return
+    rua = tlsrpt['report']
     try:
         method, _ = rua.split(':', maxsplit=1)
     except ValueError:
@@ -241,47 +333,37 @@ def send_report(mtasts):
     if method not in rua_methods:
         print('Unsupported rua method "%s" in rua "%s"!' % (method, rua))
         return
-    rua_methods[method](rua, gen_report(mtasts))
+    rua_methods[method](rua, gen_report(tlsrpt))
 
 
 
 # ARGUMENTS
 default_lmdb = '/var/spool/exim4/lmdb2/'
-default_org_name = 'SnakeOil'
+default_org_domain = 'invalid'
 default_contact = 'smtp-tls-reports@invalid'
 yesterday = datetime.date.today() - datetime.timedelta(days=1)
+default_ignore_domains = []
 parser = argparse.ArgumentParser(description='MTA-STS report generator')
-parser.add_argument('--lmdb',     type=str, help="path to mta-lmdb.pl's lmdb database", default=default_lmdb)
-parser.add_argument('--org-name', type=str, help='orginization name in reports',        default=default_org_name)
-parser.add_argument('--contact',  type=str, help='contact info in reports',             default=default_contact)
-parser.add_argument('--date',     type=str, help='ISO date of report (def: yesterday)', default=str(yesterday))
-parser.add_argument('--bcc',      type=str, help='BCC for send mails, comma seperated')
-parser.add_argument('--dry-run',  action='store_true', help='do not MAIL or POST reports')
-parser.add_argument('--no-mails', action='store_true', help='do not MAIL reports')
-parser.add_argument('--no-posts', action='store_true', help='do not POST reports')
+parser.add_argument('--lmdb',       type=str, help="path to mta-lmdb.pl's lmdb database", default=default_lmdb)
+parser.add_argument('--org-domain', type=str, help='organization domain in reports',      default=default_org_domain)
+parser.add_argument('--org-name',   type=str, help='organization name in reports',        default=default_org_domain)
+parser.add_argument('--contact',    type=str, help='contact info in reports',             default=default_contact)
+parser.add_argument('--date',       type=str, help='ISO date of report (def: yesterday)', default=str(yesterday))
+parser.add_argument('--bcc',        type=str, help='BCC for send mails, comma seperated')
+parser.add_argument('--dry-run',    action='store_true', help='do not MAIL or POST reports')
+parser.add_argument('--no-mails',   action='store_true', help='do not MAIL reports')
+parser.add_argument('--no-posts',   action='store_true', help='do not POST reports')
+parser.add_argument('--ignore-domains', type=str, help='ignore these domains, comma seperated', default=','.join(default_ignore_domains))
 parser.add_argument('logfiles',   type=str, help='exim log files', nargs='+')
 args = parser.parse_args()
+if args.org_name == default_org_domain and args.org_domain != args.org_name:
+    args.org_name = args.org_domain
+ignore_domains = args.ignore_domains.split(',')
 startdate = datetime.date.fromisoformat(args.date)
 starttime = datetime.datetime.fromisoformat(startdate.isoformat())
 endtime   = starttime + datetime.timedelta(days=1) - datetime.timedelta(seconds=1)
 dsep = '='*200
 
-
-# initialize the fields of out mtadb data
-mtadb = defaultdict(
-    lambda: dict(
-        id=None,
-        domain=None,
-        policy='not stored',
-        mode=None,
-        mx=[],
-        report=None,
-        expire=None,
-        needsreport=False,
-        deliveries=[],
-        errors=[],
-    )
-)
 
 # open LMDB database
 env = lmdb.open(args.lmdb, max_dbs=10)
@@ -292,18 +374,16 @@ with env.begin() as txn:
     for key, value in list(txn.cursor(db=db))[1:]:
         k, v = key.decode(), value.decode()
         domain, attr = k.split(':', maxsplit=1)
-        # store the domain as part of the 'mtasts' struct
-        mtadb[domain]['domain'] = domain
+        # store the domain as part of the 'tlsrpt' struct
+        tlsrpt_data[domain]['domain'] = domain
         # store all values in the corresponding attr
-        mtadb[domain][attr] = v
+        tlsrpt_data[domain][attr] = v.split(':') if attr == 'mx' else v
 
 
 # generate a regex from all domains
-domains_re = r'|'.join( [ re.escape(domain) for domain in mtadb.keys() ] )
-exim_delivery_re = r'^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) .+ (?P<delivered>[=-][>=]) \S+@(?P<domain>' + domains_re + r') .+ H=(?P<mxhost>\S+) .+$'
+exim_delivery_re = r'^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) .+ (?P<delivered>[=-][>=]) \S+@(?P<domain>\S+) .+ H=(?P<mxhost>\S+) .+$'
 # read the exim logfile
-def match_mx(host, mtadbmx):
-    mx_list = mtadbmx.split(':')
+def match_mx(host, mx_list):
     if host in mx_list:
         return True
     parts = host.split('.')
@@ -323,10 +403,11 @@ for logfile in args.logfiles:
             # skip all retry time defers
             if 'retry time not reached' in line:
                 continue
+            # convert (local) time from log to UTC
             localdt = datetime.datetime.fromisoformat( delivery_match.group('ts') )
             utcdt = localtz2utc(localdt)
-            if starttime > utcdt or endtime < utcdt:
-                print('Ignoring wrong time: %s' % line.strip(), file=sys.stderr)
+            # skip if log entry is outside start2end time frame
+            if utcdt < starttime or endtime < utcdt:
                 continue
             line = line.strip()
             # check if successful delivery or defer
@@ -335,22 +416,23 @@ for logfile in args.logfiles:
             domain = delivery_match.group('domain')
             # get the used MX host
             mxhost = delivery_match.group('mxhost')
-            # flag domain needs reporting
-            mtadb[domain]['needsreport'] = True
-            # store log line in 'deliveries' resp. 'errors'
-            if delivered:
-                mtadb[domain]['deliveries'].append(line)
+            if domain in ignore_domains:
                 continue
-            mtadb[domain]['errors'].append(line)
+            if domain not in tlsrpt_data:
+                tlsrpt_data[domain] = non_mtasts_domain(domain)
+            # flag domain needs reporting
+            tlsrpt_data[domain]['needsreport'] = True
+            # store log line in 'deliveries' resp. 'errors'
+            tlsrpt_data[domain]['deliveries' if delivered else 'errors'].append(line)
             # check if mx hostnames do no match this delivery line
-            if not match_mx(mxhost, mtadb[domain]['mx']):
-                print('Warning: Host "%s" must not be used to deliver to domain "%s" according to policy:\n%s' % (mxhost, domain, mtadb[domain]['policy']), file=sys.stderr)
+            if tlsrpt_data[domain]['policy_type'] in ['sts', 'tlsa'] and not match_mx(mxhost, tlsrpt_data[domain]['mx']):
+                warn('Warning: Host "%s" must not be used to deliver to domain "%s" according to policy:\n%s' % (mxhost, domain, tlsrpt_data[domain]['policy_type']))
 
 
 # iterate over all domains
-for domain, mtasts in mtadb.items():
+for domain, tlsrpt in tlsrpt_data.items():
     # skip domains, that do not need a report (no logs found)
-    if not mtasts['needsreport']:
+    if not tlsrpt['needsreport']:
         continue
     # send report otherwise
-    send_report(mtasts)
+    send_report(tlsrpt)
