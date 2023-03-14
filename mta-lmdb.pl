@@ -56,8 +56,13 @@ sub getmta
 	my $TimeEpoch = DateTime->now()->epoch;
 	my $path = '/var/spool/exim4/lmdb2';
 
+        Exim::debug_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'")');
+
 # Fail quickly if there is no database or access to the database.
-	eval { make_path( $path ); 1} or do { return ('fail'); };
+	eval { make_path( $path, { mode => 0750 } ); 1} or do {
+            Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning "fail": failed to create db path "'.$path.'".');
+            return ('fail');
+        };
 
 	my $env = LMDB::Env->new($path, {
 		mapsize => 100 * 1024 * 1024 * 1024,
@@ -72,13 +77,14 @@ sub getmta
 		my $domain = $sts->domain($domainname);
 
 		my ($DANE,$STSID, $Output, $policy, $domainReport, $policyMX, $policyMODE,
-			$policyMAX, $policyMXArray, $ExpireTime, $idfromDB, $STSID, $BADID );
+			$policyMAX, $policyMXArray, $ExpireTime, $idfromDB, $STSID, $BADID, $policy_string );
 
 # Stop processing quickly if the domain has a TLSA record that identifies as DANE
 		eval { $DANE = $domain->tlsa; };
 		if ( $DANE ) {
 			$txn->commit;
 # Dane is primary. Exit out and depend on Dane
+                        Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning "dane": DANE is primary');
 			return ('dane')
 		;}
 
@@ -120,7 +126,13 @@ sub getmta
 			eval { $policy = $domain->policy; } or do {
 				$txn->commit;
 # Found a good MTA-STS DNS entry and no policy is available from the cache or http
-				return ('fail');
+                                # https://www.rfc-editor.org/rfc/rfc8461#section-3.3:
+                                #    If a valid TXT record is found but no policy can be fetched via HTTPS
+                                #   (for any reason), and there is no valid (non-expired) previously
+                                #   cached policy, senders MUST continue with delivery as though the
+                                #   domain has not implemented MTA-STS.
+                                Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning "none": good MTA-STS DNS entry but no policy available from cache or http');
+				return ('none');
 			};
 # Check for badly formatted Policy
 			eval {
@@ -129,21 +141,25 @@ sub getmta
 				$policyMX =~s/ /:/g;
 				$policyMODE = $policy->mode;
 				$policyMAX = ($policy->max_age + $TimeEpoch);
+                                $policy_string = $policy->as_string;
 			} or do {
 				$txn->commit;
 # Found some aspects of a policy, but it is badly formatted
+                                Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning "fail": badly formatted policy');
 				return ('fail');
 			};
 
-			eval { $domainReport = substr($domain->tlsrpt->rua,7); };
+			eval { $domainReport = $domain->tlsrpt->rua; };
 
 			$mtaDB->put("${domainname}:mode",$policyMODE,MDB_NODUPDATA);
 			$mtaDB->put("${domainname}:mx","$policyMX",MDB_NODUPDATA);
 			$mtaDB->put("${domainname}:expire",$policyMAX,MDB_NODUPDATA);
 			$mtaDB->put("${domainname}:id",$STSID,MDB_NODUPDATA);
 			$mtaDB->put("${domainname}:report",$domainReport,MDB_NODUPDATA);
+			$mtaDB->put("${domainname}:policy",$policy_string,MDB_NODUPDATA);
 			$txn->commit;
 # Loaded the DB with a proper policy.  Send the current mode and have a nice day.
+                        Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning "'.$policyMODE.'" (after updating DB)');
 			return "$policyMODE";
 		}
 
@@ -153,11 +169,13 @@ sub getmta
 			$policyMX = $mtaDB->get("${domainname}:mx");
 			$txn->commit;
 # Current policy found in the DB.  Send the current mode.
+                        Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning "'.$policyMODE.'" from DB');
 			return "$policyMODE";
 		}
 
 # No Policy in the DB and there is no MTA-STS record in the DNS.
 		$txn->commit;
+                Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning "none": No Policy in the DB and there is no MTA-STS record in the DNS');
 		return ('none');
 	} else {
 
@@ -178,7 +196,11 @@ sub getmta
 		my @HostNameListArray = split /:/, $policyMX;
 		my $bool;
 		$bool = any { $hostname=~$_ } @HostNameListArray;
-		if ($bool) { return (""); }
+		if ($bool) {
+                    Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning "": hostname "'.$hostname.'" in policyMX="'.$policyMX.'"');
+                    return ("");
+                }
+                Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning 0: hostname "'.$hostname.'" NOT IN policyMX="'.$policyMX.'"');
  		return (0);
 	}
 }
@@ -191,8 +213,13 @@ sub getmx
 	my $domainname = lc shift;
 	my $path = '/var/spool/exim4/lmdb2';
 
+        Exim::debug_write('mta-lmdb.pl::getmx(domainname="'.$domainname.'")');
+
 # Fail quickly if there is no database or access to the database.
-	eval { make_path( $path ); 1} or do { return ('fail'); };
+	eval { make_path( $path, { mode => 0750 } ); 1} or do {
+            Exim::log_write('mta-lmdb.pl::getmx(domainname="'.$domainname.'"): returning "fail": failed to create db path "'.$path.'".');
+            return ('fail');
+        };
 
 	my $env = LMDB::Env->new($path, {
 		mapsize => 100 * 1024 * 1024 * 1024,
@@ -206,5 +233,6 @@ sub getmx
 
 	my $mxReturn = $mtaDB->get("${domainname}:mx");
 	$txn->commit;
+        Exim::log_write('mta-lmdb.pl::getmx(domainname="'.$domainname.'"): returning "'.$mxReturn.'".');
 	return ($mxReturn);
 }
