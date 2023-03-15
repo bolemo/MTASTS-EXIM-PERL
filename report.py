@@ -303,16 +303,8 @@ def post_report(rua, report):
     if not response.ok:
         warn('POST to "%s" failed with %s %s: %s' % (rua, response.status_code, response.reason, response.text))
         return
-    print(response)
-    print('response content=[%s]' % response.content.decode())
     send_mail('POST@%s' % re.sub(r'[/?&]', '.', rua[8:]), report, fake=True)
     return
-'''
-POST to "https://tlsrpt.azurewebsites.net/report" failed with 400 Bad Request: The content type should either be application/tlsrpt+gzip or application/tlsrpt+json
-(and no encoding!)
-POST to "https://tlsrpt.azurewebsites.net/report" failed with 400 Bad Request: Start date time shall be 00:00 of a day
-POST to "https://tlsrpt.azurewebsites.net/report" failed with 400 Bad Request: Requests from a same IP address and sender organization are not allowed in 24 hours
-'''
 
 def send_report(tlsrpt):
     if tlsrpt['policy_type'] == 'none':
