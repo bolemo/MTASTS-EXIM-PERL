@@ -344,6 +344,7 @@ default_lmdb = '/var/spool/exim4/lmdb2/'
 default_org_domain = 'invalid'
 default_contact = 'smtp-tls-reports@invalid'
 yesterday = datetime.date.today() - datetime.timedelta(days=1)
+default_only_domains = []
 default_ignore_domains = []
 parser = argparse.ArgumentParser(description='MTA-STS report generator')
 parser.add_argument('--lmdb',       type=str, help="path to mta-lmdb.pl's lmdb database", default=default_lmdb)
@@ -352,15 +353,17 @@ parser.add_argument('--org-name',   type=str, help='organization name in reports
 parser.add_argument('--contact',    type=str, help='contact info in reports',             default=default_contact)
 parser.add_argument('--date',       type=str, help='ISO date of report (def: yesterday)', default=str(yesterday))
 parser.add_argument('--bcc',        type=str, help='BCC for send mails, comma seperated')
+parser.add_argument('--only-domains',   type=str, help='only handle these domains, comma seperated', default=','.join(default_only_domains))
+parser.add_argument('--ignore-domains', type=str, help='ignore these domains, comma seperated',      default=','.join(default_ignore_domains))
 parser.add_argument('--dry-run',    action='store_true', help='do not MAIL or POST reports')
 parser.add_argument('--no-mails',   action='store_true', help='do not MAIL reports')
 parser.add_argument('--no-posts',   action='store_true', help='do not POST reports')
-parser.add_argument('--ignore-domains', type=str, help='ignore these domains, comma seperated', default=','.join(default_ignore_domains))
 parser.add_argument('logfiles',   type=str, help='exim log files', nargs='+')
 args = parser.parse_args()
 if args.org_name == default_org_domain and args.org_domain != args.org_name:
     args.org_name = args.org_domain
-ignore_domains = args.ignore_domains.split(',')
+only_domains   = args.only_domains.split(',')   if len(args.only_domains)   else []
+ignore_domains = args.ignore_domains.split(',') if len(args.ignore_domains) else []
 startdate = datetime.date.fromisoformat(args.date)
 starttime = datetime.datetime.fromisoformat(startdate.isoformat())
 endtime   = starttime + datetime.timedelta(days=1) - datetime.timedelta(seconds=1)
@@ -419,6 +422,10 @@ for logfile in args.logfiles:
             # get the used MX host
             mxhost = delivery_match.group('mxhost')
             if domain in ignore_domains:
+                #warn('Ignoring domain "%s", in ignore_domains=%s' % (domain, ignore_domains))
+                continue
+            if len(only_domains) > 0 and domain not in only_domains:
+                #warn('Ignoring domain "%s", not in only_domains=%s' % (domain, only_domains))
                 continue
             if domain not in tlsrpt_data:
                 tlsrpt_data[domain] = non_mtasts_domain(domain)
