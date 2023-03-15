@@ -270,7 +270,7 @@ def mail_report(rua, report):
     send_mail(rua_email, report)
     return
 
-# HTTP debugging
+# # HTTP debugging
 # import logging
 # # These two lines enable debugging at httplib level (requests->urllib3->http.client)
 # # You will see the REQUEST, including HEADERS and DATA, and RESPONSE with HEADERS but without DATA.
@@ -287,15 +287,16 @@ def post_report(rua, report):
     if args.no_posts:
         return
     print('POSTing report to %s' % rua)
-    headers =  {'Content-Type': 'application/tlsrpt+json'}
+    headers =  {'Content-Type': 'application/tlsrpt+gzip'}
+    report_json = json.dumps(report)
+    report_gz = gzip.compress(report_json.encode())
     if args.dry_run:
         print(dsep)
         print('POST %s headers=%s\n%s\n' % (rua, headers, json.dumps(report, indent=4)))
         print(dsep)
         return
-    send_mail('POST@%s' % re.sub(r'[/?&]', '.', rua[8:]), report, fake=True)
     try:
-        response = requests.post(rua, json=report, headers=headers)
+        response = requests.post(rua, data=report_gz, headers=headers)
     except requests.exceptions.ConnectionError as e:
         warn('POST to "%s" failed with ConnectionError: %s' % (rua, e))
         return
@@ -303,7 +304,8 @@ def post_report(rua, report):
         warn('POST to "%s" failed with %s %s: %s' % (rua, response.status_code, response.reason, response.text))
         return
     print(response)
-    print(response.content.decode())
+    print('response content=[%s]' % response.content.decode())
+    send_mail('POST@%s' % re.sub(r'[/?&]', '.', rua[8:]), report, fake=True)
     return
 '''
 POST to "https://tlsrpt.azurewebsites.net/report" failed with 400 Bad Request: The content type should either be application/tlsrpt+gzip or application/tlsrpt+json
