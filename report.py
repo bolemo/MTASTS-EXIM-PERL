@@ -32,6 +32,7 @@ tlsrpt_struct = lambda: dict(
     report=None,
     expire=None,
     needsreport=False,
+    logs=[],
     deliveries=[],
     errors=[],
 )
@@ -378,7 +379,7 @@ with env.begin() as txn:
 
 
 # generate a regex from all domains
-exim_delivery_re = r'^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) .+ (?P<delivered>[=-][>=]) \S+@(?P<domain>\S+) .+ H=(?P<mxhost>\S+) .+$'
+exim_delivery_re = r'^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) .+ (?P<delivered>[=-][>=]) (?P<recipient>\S+@(?P<domain>\S+))( (.* )?P=<(?P<sender>\S+)>)? .+ H=(?P<mxhost>\S+) .+$'
 # read the exim logfile
 def match_mx(host, mx_list):
     if host in mx_list:
@@ -409,8 +410,12 @@ for logfile in args.logfiles:
             line = line.strip()
             # check if successful delivery or defer
             delivered = delivery_match.group('delivered').endswith('>')
-            # get the matched domain
+            # get the matched recipient address
+            recipient = delivery_match.group('recipient')
+            # get the matched recipient domain
             domain = delivery_match.group('domain')
+            # get the matched sender address
+            sender = delivery_match.group('sender')
             # get the used MX host
             mxhost = delivery_match.group('mxhost')
             if domain in ignore_domains:
@@ -421,10 +426,17 @@ for logfile in args.logfiles:
                 continue
             if domain not in tlsrpt_data:
                 tlsrpt_data[domain] = non_mtasts_domain(domain)
-            # flag domain needs reporting
-            tlsrpt_data[domain]['needsreport'] = True
-            # store log line in 'deliveries' resp. 'errors'
-            tlsrpt_data[domain]['deliveries' if delivered else 'errors'].append(line)
+            rua = tlsrpt_data[domain]['report']
+            if rua is None:
+                #warn('Ignoring domain %s without rua set: %s' % (domain, line))
+                continue
+            tlsrpt_data[domain]['logs'].append(dict(
+                line = line,
+                delivered = delivered,
+                recipient = recipient,
+                sender = sender,
+                mxhost = mxhost,
+            ))
             # check if mx hostnames do no match this delivery line
             if tlsrpt_data[domain]['policy_type'] in ['sts', 'tlsa'] and not match_mx(mxhost, tlsrpt_data[domain]['mx']):
                 warn('Warning: Host "%s" must not be used to deliver to domain "%s" according to policy:\n%s' % (mxhost, domain, tlsrpt_data[domain]['policy_type']))
@@ -432,6 +444,25 @@ for logfile in args.logfiles:
 
 # iterate over all domains
 for domain, tlsrpt in tlsrpt_data.items():
+    if len(tlsrpt['logs']) == 0:
+        continue
+    if tlsrpt['report'] is None:
+        continue
+    for logentry in tlsrpt['logs']:
+        if logentry['sender'] == args.contact:
+            #warn('Ignoring sender: %s' % logentry['sender'])
+            continue
+        if len([
+                t for t in tlsrpt_data.values()
+                if t['report'] == 'mailto:'+logentry['recipient']
+        ]):
+            warn('Ignoring recipient: %s' % logentry['recipient'])
+            continue
+        #warn('line: %s' % logentry['line'])
+        # flag domain needs reporting
+        tlsrpt_data[domain]['needsreport'] = True
+        # store log line in 'deliveries' resp. 'errors'
+        tlsrpt['deliveries' if logentry['delivered'] else 'errors'].append(logentry['line'])
     # skip domains, that do not need a report (no logs found)
     if not tlsrpt['needsreport']:
         continue
