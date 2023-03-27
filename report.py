@@ -215,7 +215,7 @@ def gen_report(tlsrpt):
 def send_mail(rua, report, fake=False):
     domain = report['policies'][0]['policy']['policy-domain']
     smtp_from = args.contact
-    print('Mailing report to %s' % rua)
+    print('Mailing report to %s (domain:%s)' % (rua, domain))
     smtp_to = [rua] if not fake else []
     if args.bcc:
         smtp_to += args.bcc.split(',')
@@ -287,7 +287,8 @@ def mail_report(rua, report):
 def post_report(rua, report):
     if args.no_posts:
         return
-    print('POSTing report to %s' % rua)
+    domain = report['policies'][0]['policy']['policy-domain']
+    print('POSTing report to %s (domain:%s)' % (rua, domain))
     headers =  {'Content-Type': 'application/tlsrpt+gzip'}
     report_json = json.dumps(report)
     report_gz = gzip.compress(report_json.encode())
