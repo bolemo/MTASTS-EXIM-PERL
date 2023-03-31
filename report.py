@@ -151,8 +151,9 @@ def exim_error2tlsrpt_error(error):
     }
     if error in errors:
         return errors[error]
-    if error.startswith('SMTP error from remote mail server '):
-        return None
+    for ign in [ 'SMTP timeout ', 'SMTP error from remote mail server ' ]:
+        if error.startswith(ign):
+            return None
     warn('Unknown error string "%s"!' % error)
     return 'validation-failure'
 
