@@ -197,6 +197,9 @@ def gen_report(tlsrpt):
             "policy-string": tlsrpt['policy'].strip().split('\n'),
             "mx-host":       tlsrpt['mx'],
         })
+    failure_details = []
+    if len(tlsrpt['errors']) > 0:
+        failure_details = parse_exim_errors(tlsrpt['errors'])
     report = {
         "organization-name": args.org_name,
         "date-range": {
@@ -213,13 +216,13 @@ def gen_report(tlsrpt):
                 "policy": policy,
                 "summary": {
                     "total-successful-session-count": len(tlsrpt['deliveries']),
-                    "total-failure-session-count": len(tlsrpt['errors']),
+                    "total-failure-session-count": len(failure_details),
                 },
             },
         ],
     }
-    if len(tlsrpt['errors']) > 0:
-        report['policies'][0]['failure-details'] = parse_exim_errors(tlsrpt['errors'])
+    if len(failure_details) > 0:
+        report['policies'][0]['failure-details'] = failure_details
     return report
 
 def send_mail(rua, report, fake=False):
