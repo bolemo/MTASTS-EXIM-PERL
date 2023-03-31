@@ -44,7 +44,12 @@ def dns_resolve_rrset(qname, rdtype):
         answer = dns.resolver.resolve(qname, rdtype, search=False)
     except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
         return set()
-    return { rr.to_text() for rr in answer }
+    # dns.rdtypes.ANY.TXT.TXT's to_text is somehow broken, we parse TXT records better on our own
+    def rr2text(rr):
+        if rdtype != 'TXT':
+            return rr.to_text()
+        return '"'+''.join([s.decode() for s in rr.strings])+'"'
+    return { rr2text(rr) for rr in answer }
 
 # returns rua value of domain's DNS TLSRPT record or None if no such record found
 def get_tlsrpt_rua(domain):
@@ -54,7 +59,7 @@ def get_tlsrpt_rua(domain):
             continue
         tlsrpt = record[12:-1].strip()
         if re.match('.*[ ;]', tlsrpt):
-            warn('Illegal TLSRPT record: %s' % record)
+            warn('Illegal TLSRPT record of domain %s: %s' % (domain, record))
             continue
         # "rua=..."
         return tlsrpt[4:]
