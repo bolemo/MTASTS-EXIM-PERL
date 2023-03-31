@@ -146,6 +146,8 @@ def exim_error2tlsrpt_error(error):
     }
     if error in errors:
         return errors[error]
+    if error.startswith('SMTP error from remote mail server '):
+        return None
     warn('Unknown error string "%s"!' % error)
     return 'validation-failure'
 
@@ -164,6 +166,8 @@ def parse_exim_errors(lines):
         lip    = error_match.group('lip')
         error  = error_match.group('error')
         result_type = exim_error2tlsrpt_error(error)
+        if result_type is None:
+            continue
         key = (result_type, lip, mxip, mxhost)
         errors[key] += 1
     return [
