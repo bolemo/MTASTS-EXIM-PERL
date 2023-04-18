@@ -310,6 +310,7 @@ def post_report(rua, report):
         print('POST %s headers=%s\n%s\n' % (rua, headers, json.dumps(report, indent=4)))
         print(dsep)
         return
+    send_mail('POST@%s' % re.sub(r'[/?&]', '.', rua[8:]), report, fake=True)
     try:
         response = requests.post(rua, data=report_gz, headers=headers)
     except requests.exceptions.ConnectionError as e:
@@ -318,7 +319,6 @@ def post_report(rua, report):
     if not response.ok:
         warn('POST to "%s" failed with %s %s: %s' % (rua, response.status_code, response.reason, response.text))
         return
-    send_mail('POST@%s' % re.sub(r'[/?&]', '.', rua[8:]), report, fake=True)
     return
 
 def send_report(tlsrpt):
