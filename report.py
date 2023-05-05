@@ -21,6 +21,10 @@ def warn(msg):
     print(msg, file=sys.stderr)
     return
 
+def debug(msg):
+    print(msg)
+    return
+
 # initialize the fields of out tlsrpt data
 tlsrpt_struct = lambda: dict(
     id=None,
@@ -228,7 +232,7 @@ def gen_report(tlsrpt):
 def send_mail(rua, report, fake=False):
     domain = report['policies'][0]['policy']['policy-domain']
     smtp_from = args.contact
-    print('Mailing report to %s (domain:%s)' % (rua, domain))
+    debug('Mailing report to %s (domain:%s)' % (rua, domain))
     smtp_to = [rua] if not fake else []
     if args.bcc:
         smtp_to += args.bcc.split(',')
@@ -267,9 +271,11 @@ def send_mail(rua, report, fake=False):
 
     smtp_body = msg.as_string()
     if args.dry_run:
-        print(dsep)
-        print(smtp_body)
-        print(dsep)
+        print('\n'.join([
+            dsep,
+            smtp_body,
+            dsep
+        ]))
         return
     with smtplib.SMTP(host='localhost') as smtp:
         failed_recipients = smtp.sendmail(smtp_from, smtp_to, msg.as_string())
@@ -301,14 +307,16 @@ def post_report(rua, report):
     if args.no_posts:
         return
     domain = report['policies'][0]['policy']['policy-domain']
-    print('POSTing report to %s (domain:%s)' % (rua, domain))
+    debug('POSTing report to %s (domain:%s)' % (rua, domain))
     headers =  {'Content-Type': 'application/tlsrpt+gzip'}
     report_json = json.dumps(report)
     report_gz = gzip.compress(report_json.encode())
     if args.dry_run:
-        print(dsep)
-        print('POST %s headers=%s\n%s\n' % (rua, headers, json.dumps(report, indent=4)))
-        print(dsep)
+        print('\n'.join([
+            dsep,
+            'POST %s headers=%s\n%s\n' % (rua, headers, json.dumps(report, indent=4)),
+            dsep
+        ]))
         return
     send_mail('POST@%s' % re.sub(r'[/?&]', '.', rua[8:]), report, fake=True)
     try:
@@ -340,7 +348,7 @@ def send_report(tlsrpt):
         https=post_report,
     )
     if method not in rua_methods:
-        print('Unsupported rua method "%s" in rua "%s"!' % (method, rua))
+        warn('Unsupported rua method "%s" in rua "%s"!' % (method, rua))
         return
     rua_methods[method](rua, gen_report(tlsrpt))
 
@@ -365,6 +373,7 @@ parser.add_argument('--ignore-domains', type=str, help='ignore these domains, co
 parser.add_argument('--dry-run',    action='store_true', help='do not MAIL or POST reports')
 parser.add_argument('--no-mails',   action='store_true', help='do not MAIL reports')
 parser.add_argument('--no-posts',   action='store_true', help='do not POST reports')
+parser.add_argument('--verbose',    action='store_true', help='be verbose')
 parser.add_argument('logfiles',   type=str, help='exim log files', nargs='+')
 args = parser.parse_args()
 if args.org_name == default_org_domain and args.org_domain != args.org_name:
@@ -375,6 +384,8 @@ startdate = datetime.date.fromisoformat(args.date)
 starttime = datetime.datetime.fromisoformat(startdate.isoformat())
 endtime   = starttime + datetime.timedelta(days=1) - datetime.timedelta(seconds=1)
 dsep = '='*200
+if not args.verbose:
+    debug = lambda a: None
 
 
 # open LMDB database
