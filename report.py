@@ -41,6 +41,7 @@ tlsrpt_struct = lambda: dict(
     errors=[],
 )
 tlsrpt_data = defaultdict(tlsrpt_struct)
+error_domains = set()
 
 # resolve a given qname+rdtype and return a set of resource records or an empty set on error
 def dns_resolve_rrset(qname, rdtype):
@@ -449,8 +450,15 @@ for logfile in args.logfiles:
             if len(only_domains) > 0 and domain not in only_domains:
                 #warn('Ignoring domain "%s", not in only_domains=%s' % (domain, only_domains))
                 continue
+            if domain in error_domains:
+                continue
             if domain not in tlsrpt_data:
-                tlsrpt_data[domain] = non_mtasts_domain(domain)
+                try:
+                    tlsrpt_data[domain] = non_mtasts_domain(domain)
+                except Exception as e:
+                    warn(f'Error getting report config for non-mtasts domain {domain}, will ignore domain: {e}')
+                    error_domains.add(domain)
+                    continue
             rua = tlsrpt_data[domain]['report']
             if rua is None:
                 #warn('Ignoring domain %s without rua set: %s' % (domain, line))
