@@ -30,6 +30,11 @@ if [ -n "$ignore_domains" ]; then
         --ignore-domains "$ignore_domains"
     )
 fi
+if [ -n "$ignore_senders" ]; then
+    cmd+=(
+        --ignore-senders "$ignore_senders"
+    )
+fi
 if [ -n "$bcc" ]; then
     cmd+=(
         --bcc "$bcc"

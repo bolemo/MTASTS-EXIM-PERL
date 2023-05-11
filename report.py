@@ -362,6 +362,7 @@ default_contact = 'smtp-tls-reports@invalid'
 yesterday = datetime.date.today() - datetime.timedelta(days=1)
 default_only_domains = []
 default_ignore_domains = []
+default_ignore_senders = []
 parser = argparse.ArgumentParser(description='MTA-STS report generator')
 parser.add_argument('--lmdb',       type=str, help="path to mta-lmdb.pl's lmdb database", default=default_lmdb)
 parser.add_argument('--org-domain', type=str, help='organization domain in reports',      default=default_org_domain)
@@ -371,6 +372,7 @@ parser.add_argument('--date',       type=str, help='ISO date of report (def: yes
 parser.add_argument('--bcc',        type=str, help='BCC for send mails, comma seperated')
 parser.add_argument('--only-domains',   type=str, help='only handle these domains, comma seperated', default=','.join(default_only_domains))
 parser.add_argument('--ignore-domains', type=str, help='ignore these domains, comma seperated',      default=','.join(default_ignore_domains))
+parser.add_argument('--ignore-senders', type=str, help='ignore log entries from these senders, comma seperated',      default=','.join(default_ignore_senders))
 parser.add_argument('--dry-run',    action='store_true', help='do not MAIL or POST reports')
 parser.add_argument('--no-mails',   action='store_true', help='do not MAIL reports')
 parser.add_argument('--no-posts',   action='store_true', help='do not POST reports')
@@ -381,6 +383,7 @@ if args.org_name == default_org_domain and args.org_domain != args.org_name:
     args.org_name = args.org_domain
 only_domains   = args.only_domains.split(',')   if len(args.only_domains)   else []
 ignore_domains = args.ignore_domains.split(',') if len(args.ignore_domains) else []
+ignore_senders = args.ignore_senders.split(',') if len(args.ignore_senders) else []
 startdate = datetime.date.fromisoformat(args.date)
 starttime = datetime.datetime.fromisoformat(startdate.isoformat())
 endtime   = starttime + datetime.timedelta(days=1) - datetime.timedelta(seconds=1)
@@ -482,7 +485,7 @@ for domain, tlsrpt in tlsrpt_data.items():
     if tlsrpt['report'] is None:
         continue
     for logentry in tlsrpt['logs']:
-        if logentry['sender'] == args.contact:
+        if logentry['sender'] in [ args.contact ] + ignore_senders:
             #warn('Ignoring sender: %s' % logentry['sender'])
             continue
         if len([
