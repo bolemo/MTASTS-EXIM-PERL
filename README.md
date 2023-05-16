@@ -1,6 +1,14 @@
-# Forked from https://github.com/Bobberty/MTASTS-EXIM-PERL
-
 # MTASTS-EXIM-PERL
+
+This is a forked version from
+https://github.com/Bobberty/MTASTS-EXIM-PERL which seems orphaned (no
+commits since 2019, open issue since 2023-03-01).
+
+In addition to the perl script for Exim, this repository also provides
+a report generator for TLSRPT report according to RFC 8460, [see
+below](#report-generator).
+
+
 ## Perl script designed to be used by Exim for RFC 8461 MTA-STS compliance.
 
 ### Perl Dependancies:
@@ -236,3 +244,77 @@ hosts_try_dane = *
 .endif
 ```
   
+## <a name="report-generator"></a>RFC8460 report generator for Exim log files
+
+### Python Dependancies:
+
+ - [py-lmdb](https://github.com/jnwatson/py-lmdb)
+ - [dnspython](http://www.dnspython.org)
+ - [requests](http://python-requests.org)
+
+
+### How it works
+
+The python script `report.py` will parse the LMDB data from the Perl
+script above to find the already fetched MTA-STS data. For better
+security, the script should not be run as `root` but as the `exim`
+user (`Debian-exim` on Debian).
+
+After that, it will search for deliveries and delivery failures in the
+logfile given for the day specified by the `--date` option (from 00:00
+UTC to 23:59:59 UTC). Gziped logfiles (with extension `.gz`) are
+supported as well.
+
+Deliveries and failures for domains not found in the LMTP data are
+considered as NON-MTA-STS (e.g. DANE). For those domains, TLSRPT
+record and TLSA records are fetched to determine the report policy.
+
+For all domains that had deliveries in the checked logs and time
+interval, a report is generated and sent according to
+RFC 8460. Sending is supported for `mailto://` and `https://` RUA
+addresses.
+
+
+### Options and arguments
+
+There is a wrapper script `report.sh` which allows setting the
+required local options and arguments for `report.py`. It will also
+search the required log files by mtime to include all logs from
+**yesterday**. Just create that file in the same directory as
+`report.sh`:
+
+```
+ignore_domains=<value for --ignore-domains, put in your own domains here>
+contact_email=<sender address for mail reports>
+organization_domain=<your organization name for the reports>
+bcc=<value for --bcc, can be empty>
+ignore_senders=<value for --ignore-senders, can be empty, see below>
+```
+
+`report.sh` will pass any options to `report.py`. Most options are
+self explaining or described in `report.sh --help`.
+
+If you announce DMARC reporting based on RFC 7489 (that is, your
+`_dmarc.DOMAIN` DNS record contains `rua=` or `ruf=` fields), I
+suggest to add this address to `--ignore-domains` resp. the
+`ignore_domains=` setting. Otherwise, you get a DMARC/TLSRPT report
+ping-pong forever.
+
+
+### Automatic reporting
+
+To configure automatic reporting use cron or any other task scheduler
+to run `/path/to/MTASTS-EXIM-PERL/report.sh` **as `exim` user** every
+day a few hours after **midnight UTC**.
+
+
+### Known issues
+
+ - Microsoft's TLSRPT RUAs point to a REST API that parses and
+   validates the received data **immediately**. Although this was good
+   to find some bugs while developing, they are very strict with
+   respect to time intervals: If you sent two reports on two
+   consecutive days, you most likely get an *400 Bad Request: Requests
+   from a same IP address and sender organization are not allowed in
+   24 hours* although you start the reporting script at the same time
+   every day (and thus at least approx. every 24 hours).
