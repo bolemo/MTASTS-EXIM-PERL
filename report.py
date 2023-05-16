@@ -1,11 +1,13 @@
 #!/usr/bin/python3
 
-import sys
-from collections import defaultdict
+'''
+a report generator for TLSRPT report (RFC8460) using exim logs
+'''
 
-import argparse
-import lmdb
-import dns.resolver
+# I use 'return' to visualize end of functions and to help emacs get indentation right
+# pylint: disable=useless-return
+
+import sys
 import io
 import gzip
 import re
@@ -15,13 +17,20 @@ import email.mime.multipart
 import email.mime.text
 import email.mime.application
 import smtplib
+from collections import defaultdict
+
+import argparse
+import lmdb
+import dns.resolver
 import requests
 
 def warn(msg):
+    # pylint: disable=missing-function-docstring
     print(msg, file=sys.stderr)
     return
 
 def debug(msg):
+    # pylint: disable=missing-function-docstring
     print(msg)
     return
 
@@ -43,78 +52,88 @@ tlsrpt_struct = lambda: dict(
 tlsrpt_data = defaultdict(tlsrpt_struct)
 error_domains = set()
 
-# resolve a given qname+rdtype and return a set of resource records or an empty set on error
 def dns_resolve_rrset(qname, rdtype):
+    '''
+    resolve a given qname+rdtype and return a set of resource records or an empty set on error
+    '''
     try:
         answer = dns.resolver.resolve(qname, rdtype, search=False)
     except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
         return set()
     # dns.rdtypes.ANY.TXT.TXT's to_text is somehow broken, we parse TXT records better on our own
-    def rr2text(rr):
+    def rr2text(rr): # pylint: disable=invalid-name
         if rdtype != 'TXT':
             return rr.to_text()
         return '"'+''.join([s.decode() for s in rr.strings])+'"'
     return { rr2text(rr) for rr in answer }
 
-# returns rua value of domain's DNS TLSRPT record or None if no such record found
-def get_tlsrpt_rua(domain):
+def get_tlsrpt_rua(domain): # pylint: disable=redefined-outer-name
+    '''
+    returns rua value of domain's DNS TLSRPT record or None if no such record found
+    '''
     for record in dns_resolve_rrset('_smtp._tls.%s' % domain, 'TXT'):
         # record='"v=TLSRPTv1; rua=email@domain.tld"'
         if not record.startswith('"v=TLSRPTv1;'):
             continue
-        tlsrpt = record[12:-1].strip()
-        if re.match('.*[ ;]', tlsrpt):
+        tlsrpt_value = record[12:-1].strip()
+        if re.match('.*[ ;]', tlsrpt_value):
             warn('Illegal TLSRPT record of domain %s: %s' % (domain, record))
             continue
         # "rua=..."
-        return tlsrpt[4:]
+        return tlsrpt_value[4:]
     return None
 
-# returns a dict of mx: tlsa_rrset of domain for all MX with valid TLSA records
-def get_tlsa_mx(domain):
+def get_tlsa_mx(domain): # pylint: disable=redefined-outer-name
+    '''
+    returns a dict of mx: tlsa_rrset of domain for all MX with valid TLSA records
+    '''
     tlsa_mx = {}
     for mx_record in dns_resolve_rrset(domain, 'MX'):
-        prio, mx = mx_record.split()
+        _, mx_target = mx_record.split()
         tlsa = [
-            '_25._tcp.%s IN TLSA %s' % (mx, tlsa_record)
-            for tlsa_record in dns_resolve_rrset('_25._tcp.%s' % mx, 'TLSA')
+            '_25._tcp.%s IN TLSA %s' % (mx_target, tlsa_record)
+            for tlsa_record in dns_resolve_rrset('_25._tcp.%s' % mx_target, 'TLSA')
         ]
-        if not len(tlsa):
+        if not tlsa:
             continue
-        # remove trailing '.' from mx to allow matching in mail logs
-        while mx.endswith('.'):
-            mx = mx[:-1]
-        tlsa_mx[mx] = ';'.join(tlsa)
+        # remove trailing '.' from mx_target to allow matching in mail logs
+        while mx_target.endswith('.'):
+            mx_target = mx_target[:-1]
+        tlsa_mx[mx_target] = ';'.join(tlsa)
     return tlsa_mx
 
-# generate tlsrpt struct for a non-MTA-STS domain
-def non_mtasts_domain(domain):
-    tlsrpt = tlsrpt_struct()
-    tlsrpt.update(dict(
+def non_mtasts_domain(domain): # pylint: disable=redefined-outer-name
+    '''
+    generate tlsrpt struct for a non-MTA-STS domain
+    '''
+    data = tlsrpt_struct()
+    data.update(dict(
         domain = domain,
         policy = 'no-policy-found',
         policy_type = 'no-policy-found',
     ))
-    rua = get_tlsrpt_rua(domain)
-    if rua is None:
+    domain_rua = get_tlsrpt_rua(domain)
+    if domain_rua is None:
         # no TLSRPT record: none policy
-        tlsrpt['policy_type'] = 'none'
-        return tlsrpt
-    tlsrpt['report'] = rua
+        data['policy_type'] = 'none'
+        return data
+    data['report'] = domain_rua
     tlsa_mx = get_tlsa_mx(domain)
     if len(tlsa_mx) > 0:
         # TLSA records found, DANE in use
-        tlsrpt.update(dict(
+        data.update(dict(
             policy_type = 'tlsa',
             policy = ';'.join(tlsa_mx.values()),
             mx = list(tlsa_mx.keys()),
         ))
-    return tlsrpt
+    return data
 
-# convert a datetime object from local time to UTC
-# inspired by
-# https://stackoverflow.com/questions/4770297/convert-utc-datetime-string-to-local-datetime
-def localtz2utc(dt):
+def localtz2utc(dt): # pylint: disable=invalid-name
+    '''
+    convert a datetime object from local time to UTC
+    inspired by
+    https://stackoverflow.com/questions/4770297/convert-utc-datetime-string-to-local-datetime
+    '''
     # convert given datetime object to a (local) timestamp
     localts = dt.timestamp()
     # compute offset to utc by
@@ -129,8 +148,10 @@ def localtz2utc(dt):
     offset = dt - datetime.datetime.utcfromtimestamp(localts)
     # return datetime object adjusted by computed offset
     return dt - offset
-def utc2localtz(dt):
-    # convert given (utc) datetime object to a LOCAL timestamp
+def utc2localtz(dt): # pylint: disable=invalid-name
+    '''
+    convert given (utc) datetime object to a LOCAL timestamp
+    '''
     localts = dt.timestamp()
     # compute offset to utc by
     # difference between given datetime object
@@ -146,7 +167,9 @@ def utc2localtz(dt):
     return dt + offset
 
 def exim_error2tlsrpt_error(error):
+    # pylint: disable=missing-function-docstring
     errors = {
+        # pylint: disable=line-too-long
         # https://easydmarc.com/blog/de/simple-mail-transfer-protocol-smtp-tls-berichterstattung/
         'a TLS session is required, but the server did not offer TLS support': 'starttls-not-supported',
         # unfortunately exim always reports 'certificate invalid'
@@ -163,24 +186,25 @@ def exim_error2tlsrpt_error(error):
     return 'validation-failure'
 
 def parse_exim_errors(lines):
+    # pylint: disable=missing-function-docstring
     errors = defaultdict(int)
-    # 2023-03-10 17:58:55 1paeYC-001MTh-0L == measurement@mail-mtasts-rn-plain.measurement.email-security-scans.org R=dnslookup T=remote_smtp_mtasts_enforce defer (-38) H=plaintext.measurement.email-security-scans.org [2a06:d1c0:dead:3::83] I=[2a06:d1c0:dead:2::182] DT=0s: a TLS session is required, but the server did not offer TLS support
-    error_re = r'^.+ == (?P<email>\S+) .+ H=(?P<mxhost>\S+) \[(?P<mxip>\S+)\] I=\[(?P<lip>\S+)\].*?: (?P<error>.+)$'
-    for line in lines:
-        error_match = re.match(error_re, line)
+    # 2023-03-10 17:58:55 1paeYC-001MTh-0L == measurement@mail-mtasts-rn-plain.measurement.email-security-scans.org R=dnslookup T=remote_smtp_mtasts_enforce defer (-38) H=plaintext.measurement.email-security-scans.org [2a06:d1c0:dead:3::83] I=[2a06:d1c0:dead:2::182] DT=0s: a TLS session is required, but the server did not offer TLS support # pylint: disable=line-too-long
+    error_re = r'^.+ == (?P<email>\S+) .+ H=(?P<mxhost>\S+) \[(?P<mxip>\S+)\] I=\[(?P<lip>\S+)\].*?: (?P<error>.+)$' # pylint: disable=line-too-long
+    for curline in lines:
+        error_match = re.match(error_re, curline)
         if not error_match:
-            warn('Failed to match error line against "%s":\n%s' % (error_re, line))
+            warn('Failed to match error line against "%s":\n%s' % (error_re, curline))
             continue
-        email  = error_match.group('email')
-        mxhost = error_match.group('mxhost')
-        mxip   = error_match.group('mxip')
-        lip    = error_match.group('lip')
-        error  = error_match.group('error')
-        result_type = exim_error2tlsrpt_error(error)
+        #f_email  = error_match.group('email')
+        f_mxhost = error_match.group('mxhost')
+        f_mxip   = error_match.group('mxip')
+        f_lip    = error_match.group('lip')
+        f_error  = error_match.group('error')
+        result_type = exim_error2tlsrpt_error(f_error)
         if result_type is None:
             continue
-        key = (result_type, lip, mxip, mxhost)
-        errors[key] += 1
+        error_key = (result_type, f_lip, f_mxip, f_mxhost)
+        errors[error_key] += 1
     return [
         {
             "result-type":           key[0],
@@ -192,19 +216,20 @@ def parse_exim_errors(lines):
         for key, count in errors.items()
     ]
 
-def gen_report(tlsrpt):
+def gen_report(data):
+    # pylint: disable=missing-function-docstring
     policy = {
-        "policy-type": tlsrpt['policy_type'],
-        "policy-domain": tlsrpt['domain'],
+        "policy-type": data['policy_type'],
+        "policy-domain": data['domain'],
     }
-    if tlsrpt['policy_type'] in ['sts', 'tlsa']:
+    if data['policy_type'] in ['sts', 'tlsa']:
         policy.update({
-            "policy-string": tlsrpt['policy'].strip().split('\n'),
-            "mx-host":       tlsrpt['mx'],
+            "policy-string": data['policy'].strip().split('\n'),
+            "mx-host":       data['mx'],
         })
     failure_details = []
-    if len(tlsrpt['errors']) > 0:
-        failure_details = parse_exim_errors(tlsrpt['errors'])
+    if len(data['errors']) > 0:
+        failure_details = parse_exim_errors(data['errors'])
     report = {
         "organization-name": args.org_name,
         "date-range": {
@@ -220,7 +245,7 @@ def gen_report(tlsrpt):
             {
                 "policy": policy,
                 "summary": {
-                    "total-successful-session-count": len(tlsrpt['deliveries']),
+                    "total-successful-session-count": len(data['deliveries']),
                     "total-failure-session-count": len(failure_details),
                 },
             },
@@ -230,25 +255,27 @@ def gen_report(tlsrpt):
         report['policies'][0]['failure-details'] = failure_details
     return report
 
-def send_mail(rua, report, fake=False):
-    domain = report['policies'][0]['policy']['policy-domain']
+def send_mail(rua_address, report, fake=False):
+    # pylint: disable=missing-function-docstring
+    # pylint: disable=too-many-locals
+    cur_domain = report['policies'][0]['policy']['policy-domain']
     smtp_from = args.contact
-    debug('Mailing report to %s (domain:%s)' % (rua, domain))
-    smtp_to = [rua] if not fake else []
+    debug('Mailing report to %s (domain:%s)' % (rua_address, cur_domain))
+    smtp_to = [rua_address] if not fake else []
     if args.bcc:
         smtp_to += args.bcc.split(',')
-    
+
     msg = email.mime.multipart.MIMEMultipart(_subtype='report')
     msg.set_param('report-type', 'tlsrpt')
     msg['Subject'] = 'Report Domain: %s Submitter: %s Report-ID: <%s>' % (
-        domain,
+        cur_domain,
         args.org_domain,
         report['report-id'],
     )
-    msg['To'] = rua
-    # XXX:fixme: make this configurable
+    msg['To'] = rua_address
+    # XXX:fixme: make this configurable # pylint: disable=fixme
     msg['From'] = 'SMTP TLS Report by %s <%s>' % (args.org_name, smtp_from)
-    msg['TLS-Report-Domain'] = domain
+    msg['TLS-Report-Domain'] = cur_domain
     msg['TLS-Report-Submitter'] = args.org_domain
 
     body  = 'This is an aggregate TLS report from %s\n' % args.org_domain
@@ -262,7 +289,7 @@ def send_mail(rua, report, fake=False):
     report_gz = gzip.compress(report_json.encode())
     filename = '%s!%s!%s!%s!001.json.gz' % (
         args.org_domain,
-        domain,
+        cur_domain,
         int(starttime.timestamp()),
         int(endtime.timestamp()),
     )
@@ -273,113 +300,124 @@ def send_mail(rua, report, fake=False):
     smtp_body = msg.as_string()
     if args.dry_run:
         print('\n'.join([
-            dsep,
+            DEBUG_SEP,
             smtp_body,
-            dsep
+            DEBUG_SEP
         ]))
         return
     with smtplib.SMTP(host='localhost') as smtp:
         failed_recipients = smtp.sendmail(smtp_from, smtp_to, msg.as_string())
         if len(failed_recipients) > 0:
             warn('Failed to send mail to: %s' % failed_recipients)
-    
-def mail_report(rua, report):
+
+def mail_report(rua_value, report):
+    # pylint: disable=missing-function-docstring
     if args.no_mails:
         return
     # strip 'mailto:' prefix
-    rua_email = rua[7:]
+    rua_email = rua_value[7:]
     send_mail(rua_email, report)
     return
 
-# # HTTP debugging
-# import logging
-# # These two lines enable debugging at httplib level (requests->urllib3->http.client)
-# # You will see the REQUEST, including HEADERS and DATA, and RESPONSE with HEADERS but without DATA.
-# # The only thing missing will be the response.body which is not logged.
-# import http.client as http_client
-# http_client.HTTPConnection.debuglevel = 1
-# # You must initialize logging, otherwise you'll not see debug output.
-# logging.basicConfig()
-# logging.getLogger().setLevel(logging.DEBUG)
-# requests_log = logging.getLogger("requests.packages.urllib3")
-# requests_log.setLevel(logging.DEBUG)
+# HTTP debugging
+#import logging
+## These two lines enable debugging at httplib level (requests->urllib3->http.client)
+## You will see the REQUEST, including HEADERS and DATA, and RESPONSE
+## with HEADERS but without DATA. The only thing missing will be the
+## response.body which is not logged.
+#import http.client as http_client
+#http_client.HTTPConnection.debuglevel = 1
+## You must initialize logging, otherwise you'll not see debug output.
+#logging.basicConfig()
+#logging.getLogger().setLevel(logging.DEBUG)
+#requests_log = logging.getLogger("requests.packages.urllib3")
+#requests_log.setLevel(logging.DEBUG)
 
-def post_report(rua, report):
+def post_report(rua_address, report):
+    # pylint: disable=missing-function-docstring
     if args.no_posts:
         return
-    domain = report['policies'][0]['policy']['policy-domain']
-    debug('POSTing report to %s (domain:%s)' % (rua, domain))
+    cur_domain = report['policies'][0]['policy']['policy-domain']
+    debug('POSTing report to %s (domain:%s)' % (rua_address, cur_domain))
     headers =  {'Content-Type': 'application/tlsrpt+gzip'}
     report_json = json.dumps(report)
     report_gz = gzip.compress(report_json.encode())
     if args.dry_run:
         print('\n'.join([
-            dsep,
-            'POST %s headers=%s\n%s\n' % (rua, headers, json.dumps(report, indent=4)),
-            dsep
+            DEBUG_SEP,
+            'POST %s headers=%s\n%s\n' % (rua_address, headers, json.dumps(report, indent=4)),
+            DEBUG_SEP
         ]))
         return
-    send_mail('POST@%s' % re.sub(r'[/?&]', '.', rua[8:]), report, fake=True)
+    send_mail('POST@%s' % re.sub(r'[/?&]', '.', rua_address[8:]), report, fake=True)
     try:
-        response = requests.post(rua, data=report_gz, headers=headers)
-    except requests.exceptions.ConnectionError as e:
-        warn('POST to "%s" failed with ConnectionError: %s' % (rua, e))
+        response = requests.post(rua_address, data=report_gz, headers=headers)
+    except requests.exceptions.ConnectionError as ex:
+        warn('POST to "%s" failed with ConnectionError: %s' % (rua_address, ex))
         return
     if not response.ok:
-        warn('POST to "%s" failed with %s %s: %s' % (rua, response.status_code, response.reason, response.text))
+        warn(
+            'POST to "%s" failed with %s %s: %s' % (
+                rua_address,
+                response.status_code,
+                response.reason,
+                response.text
+            )
+        )
         return
     return
 
-def send_report(tlsrpt):
-    if tlsrpt['policy_type'] == 'none':
+def send_report(data):
+    # pylint: disable=missing-function-docstring
+    if data['policy_type'] == 'none':
         return
-    rua = tlsrpt['report']
+    rua_value = data['report']
     try:
-        method, _ = rua.split(':', maxsplit=1)
+        method, _ = rua_value.split(':', maxsplit=1)
     except ValueError:
         # workaround for buggy db data before substr(,7) fix
-        if rua.startswith('/'):
+        if rua_value.startswith('/'):
             method = 'https'
-            rua = 'https:/'+rua
+            rua_value = 'https:/'+rua_value
         else:
             method = 'mailto'
-            rua = 'mailto:'+rua
+            rua_value = 'mailto:'+rua_value
     rua_methods = dict(
         mailto=mail_report,
         https=post_report,
     )
     if method not in rua_methods:
-        warn('Unsupported rua method "%s" in rua "%s"!' % (method, rua))
+        warn('Unsupported rua method "%s" in rua "%s"!' % (method, rua_value))
         return
-    rua_methods[method](rua, gen_report(tlsrpt))
+    rua_methods[method](rua_value, gen_report(data))
 
 
 
 # ARGUMENTS
-default_lmdb = '/var/spool/exim4/lmdb2/'
-default_org_domain = 'invalid'
-default_contact = 'smtp-tls-reports@invalid'
+DEFAULT_LMDB = '/var/spool/exim4/lmdb2/'
+DEFAULT_ORG_DOMAIN = 'invalid'
+DEFAULT_CONTACT = 'smtp-tls-reports@invalid'
 yesterday = datetime.date.today() - datetime.timedelta(days=1)
 default_only_domains = []
 default_ignore_domains = []
 default_ignore_senders = []
 parser = argparse.ArgumentParser(description='MTA-STS report generator')
-parser.add_argument('--lmdb',       type=str, help="path to mta-lmdb.pl's lmdb database", default=default_lmdb)
-parser.add_argument('--org-domain', type=str, help='organization domain in reports',      default=default_org_domain)
-parser.add_argument('--org-name',   type=str, help='organization name in reports',        default=default_org_domain)
-parser.add_argument('--contact',    type=str, help='contact info in reports',             default=default_contact)
-parser.add_argument('--date',       type=str, help='ISO date of report (def: yesterday)', default=str(yesterday))
-parser.add_argument('--bcc',        type=str, help='BCC for send mails, comma seperated')
-parser.add_argument('--only-domains',   type=str, help='only handle these domains, comma seperated', default=','.join(default_only_domains))
-parser.add_argument('--ignore-domains', type=str, help='ignore these domains, comma seperated',      default=','.join(default_ignore_domains))
-parser.add_argument('--ignore-senders', type=str, help='ignore log entries from these senders, comma seperated',      default=','.join(default_ignore_senders))
+parser.add_argument('--lmdb',       type=str, help="path to mta-lmdb.pl's lmdb database", default=DEFAULT_LMDB)                                                 # pylint: disable=line-too-long
+parser.add_argument('--org-domain', type=str, help='organization domain in reports',      default=DEFAULT_ORG_DOMAIN)                                           # pylint: disable=line-too-long
+parser.add_argument('--org-name',   type=str, help='organization name in reports',        default=DEFAULT_ORG_DOMAIN)                                           # pylint: disable=line-too-long
+parser.add_argument('--contact',    type=str, help='contact info in reports',             default=DEFAULT_CONTACT)                                              # pylint: disable=line-too-long
+parser.add_argument('--date',       type=str, help='ISO date of report (def: yesterday)', default=str(yesterday))                                               # pylint: disable=line-too-long
+parser.add_argument('--bcc',        type=str, help='BCC for send mails, comma seperated')                                                                       # pylint: disable=line-too-long
+parser.add_argument('--only-domains',   type=str, help='only handle these domains, comma seperated', default=','.join(default_only_domains))                    # pylint: disable=line-too-long
+parser.add_argument('--ignore-domains', type=str, help='ignore these domains, comma seperated',      default=','.join(default_ignore_domains))                  # pylint: disable=line-too-long
+parser.add_argument('--ignore-senders', type=str, help='ignore log entries from these senders, comma seperated',      default=','.join(default_ignore_senders)) # pylint: disable=line-too-long
 parser.add_argument('--dry-run',    action='store_true', help='do not MAIL or POST reports')
 parser.add_argument('--no-mails',   action='store_true', help='do not MAIL reports')
 parser.add_argument('--no-posts',   action='store_true', help='do not POST reports')
 parser.add_argument('--verbose',    action='store_true', help='be verbose')
 parser.add_argument('logfiles',   type=str, help='exim log files', nargs='+')
 args = parser.parse_args()
-if args.org_name == default_org_domain and args.org_domain != args.org_name:
+if args.org_name == DEFAULT_ORG_DOMAIN and args.org_domain != args.org_name:
     args.org_name = args.org_domain
 only_domains   = args.only_domains.split(',')   if len(args.only_domains)   else []
 ignore_domains = args.ignore_domains.split(',') if len(args.ignore_domains) else []
@@ -387,7 +425,7 @@ ignore_senders = args.ignore_senders.split(',') if len(args.ignore_senders) else
 startdate = datetime.date.fromisoformat(args.date)
 starttime = datetime.datetime.fromisoformat(startdate.isoformat())
 endtime   = starttime + datetime.timedelta(days=1) - datetime.timedelta(seconds=1)
-dsep = '='*200
+DEBUG_SEP = '='*200
 if not args.verbose:
     debug = lambda a: None
 
@@ -408,9 +446,10 @@ with env.begin() as txn:
 
 
 # generate a regex from all domains
-exim_delivery_re = r'^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) .+ (?P<delivered>[=-][>=]) (?P<recipient>\S+@(?P<domain>\S+))( (.* )?P=<(?P<sender>\S+)>)? .+ H=(?P<mxhost>\S+) .+$'
+exim_delivery_re = r'^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) .+ (?P<delivered>[=-][>=]) (?P<recipient>\S+@(?P<domain>\S+))( (.* )?P=<(?P<sender>\S+)>)? .+ H=(?P<mxhost>\S+) .+$' # pylint: disable=line-too-long,invalid-name
 # read the exim logfile
 def match_mx(host, mx_list):
+    # pylint: disable=missing-function-docstring
     if host in mx_list:
         return True
     parts = host.split('.')
@@ -458,8 +497,11 @@ for logfile in args.logfiles:
             if domain not in tlsrpt_data:
                 try:
                     tlsrpt_data[domain] = non_mtasts_domain(domain)
-                except Exception as e:
-                    warn(f'Error getting report config for non-mtasts domain {domain}, will ignore domain: {e}')
+                except Exception as ex: # pylint: disable=broad-except
+                    warn(
+                        f'Error getting report config for non-mtasts domain {domain}, '
+                        f'will ignore domain: {ex}'
+                    )
                     error_domains.add(domain)
                     continue
             rua = tlsrpt_data[domain]['report']
@@ -474,8 +516,12 @@ for logfile in args.logfiles:
                 mxhost = mxhost,
             ))
             # check if mx hostnames do no match this delivery line
-            if tlsrpt_data[domain]['policy_type'] in ['sts', 'tlsa'] and not match_mx(mxhost, tlsrpt_data[domain]['mx']):
-                warn('Warning: Host "%s" must not be used to deliver to domain "%s" according to policy:\n%s' % (mxhost, domain, tlsrpt_data[domain]['policy_type']))
+            if tlsrpt_data[domain]['policy_type'] in ['sts', 'tlsa'] and \
+               not match_mx(mxhost, tlsrpt_data[domain]['mx']):
+                warn(
+                    f'Warning: Host "{mxhost}" must not be used to deliver to domain "{domain}" '
+                    f'according to policy:\n{tlsrpt_data[domain]["policy_type"]}'
+                )
 
 
 # iterate over all domains
@@ -488,10 +534,10 @@ for domain, tlsrpt in tlsrpt_data.items():
         if logentry['sender'] in [ args.contact ] + ignore_senders:
             #warn('Ignoring sender: %s' % logentry['sender'])
             continue
-        if len([
+        if [
                 t for t in tlsrpt_data.values()
                 if t['report'] == 'mailto:'+logentry['recipient']
-        ]):
+        ]:
             warn('Ignoring recipient: %s' % logentry['recipient'])
             continue
         #warn('line: %s' % logentry['line'])
