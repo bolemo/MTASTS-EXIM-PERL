@@ -8,6 +8,7 @@ a report generator for TLSRPT report (RFC8460) using exim logs
 # pylint: disable=useless-return
 
 import sys
+import argparse
 import io
 import gzip
 import re
@@ -19,7 +20,6 @@ import email.mime.application
 import smtplib
 from collections import defaultdict
 
-import argparse
 import lmdb
 import dns.resolver
 import requests
