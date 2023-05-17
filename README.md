@@ -318,3 +318,9 @@ day a few hours after **midnight UTC**.
    from a same IP address and sender organization are not allowed in
    24 hours* although you start the reporting script at the same time
    every day (and thus at least approx. every 24 hours).
+
+
+## Acknowledgements
+
+ - Thanks to Tobias Fiebig for providing very useful input and test
+   infrastructure: https://email-security-scans.org/
