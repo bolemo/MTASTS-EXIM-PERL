@@ -280,8 +280,8 @@ addresses.
 There is a wrapper script `report.sh` which allows setting the
 required local options and arguments for `report.py`. It will also
 search the required log files by mtime to include all logs from
-**yesterday**. Just create that file in the same directory as
-`report.sh`:
+**yesterday**. Just create a file `report.inc` in the same directory
+as `report.sh`:
 
 ```
 ignore_domains=<value for --ignore-domains, put in your own domains here>
@@ -296,8 +296,8 @@ self explaining or described in `report.sh --help`.
 
 If you announce DMARC reporting based on RFC 7489 (that is, your
 `_dmarc.DOMAIN` DNS record contains `rua=` or `ruf=` fields), I
-suggest to add this address to `--ignore-domains` resp. the
-`ignore_domains=` setting. Otherwise, you get a DMARC/TLSRPT report
+suggest to add this address to `--ignore-senders` resp. the
+`ignore_senders=` setting. Otherwise, you get a DMARC/TLSRPT report
 ping-pong forever.
 
 
