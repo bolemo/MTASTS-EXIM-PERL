@@ -508,6 +508,9 @@ for logfile in args.logfiles:
             if rua is None:
                 #warn('Ignoring domain %s without rua set: %s' % (domain, line))
                 continue
+            if rua == '':
+                warn('Ignoring domain %s without rua set to "": %s' % (domain, line))
+                continue
             tlsrpt_data[domain]['logs'].append(dict(
                 line = line,
                 delivered = delivered,
@@ -528,7 +531,7 @@ for logfile in args.logfiles:
 for domain, tlsrpt in tlsrpt_data.items():
     if len(tlsrpt['logs']) == 0:
         continue
-    if tlsrpt['report'] is None:
+    if not tlsrpt['report']:
         continue
     for logentry in tlsrpt['logs']:
         if logentry['sender'] in [ args.contact ] + ignore_senders:
