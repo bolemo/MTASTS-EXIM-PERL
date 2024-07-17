@@ -541,7 +541,7 @@ for domain, tlsrpt in tlsrpt_data.items():
                 t for t in tlsrpt_data.values()
                 if t['report'] == 'mailto:'+logentry['recipient']
         ]:
-            warn('Ignoring recipient: %s' % logentry['recipient'])
+            #warn('Ignoring recipient: %s' % logentry['recipient'])
             continue
         #warn('line: %s' % logentry['line'])
         # flag domain needs reporting
