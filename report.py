@@ -8,8 +8,6 @@ a report generator for TLSRPT report (RFC8460) using exim logs
 # pylint: disable=useless-return
 # using dict() instead of {} avoids much quoting
 # pylint: disable=use-dict-literal
-# we currently do not use f-strings yet
-# pylint: disable=consider-using-f-string
 
 import sys
 import argparse
@@ -79,7 +77,7 @@ def get_tlsrpt_rua(domain): # pylint: disable=redefined-outer-name
     '''
     returns rua value of domain's DNS TLSRPT record or None if no such record found
     '''
-    for record in dns_resolve_rrset('_smtp._tls.%s' % domain, 'TXT'):
+    for record in dns_resolve_rrset(f'_smtp._tls.{domain}', 'TXT'):
         # record='"v=TLSRPTv1; rua=email@domain.tld"'
         if not record.startswith('"v=TLSRPTv1;'):
             continue
@@ -88,7 +86,7 @@ def get_tlsrpt_rua(domain): # pylint: disable=redefined-outer-name
             # RFC8460 allows an optional ';' at the end
             tlsrpt_value = tlsrpt_value[:-1].strip()
         if re.match('.*[ ;]', tlsrpt_value):
-            warn('Illegal TLSRPT record of domain %s: %s' % (domain, record))
+            warn(f'Illegal TLSRPT record of domain {domain}: {record}')
             continue
         # "rua=..."
         return tlsrpt_value[4:]
@@ -102,8 +100,8 @@ def get_tlsa_mx(domain): # pylint: disable=redefined-outer-name
     for mx_record in dns_resolve_rrset(domain, 'MX'):
         _, mx_target = mx_record.split()
         tlsa = [
-            '_25._tcp.%s IN TLSA %s' % (mx_target, tlsa_record)
-            for tlsa_record in dns_resolve_rrset('_25._tcp.%s' % mx_target, 'TLSA')
+            f'_25._tcp.{mx_target} IN TLSA {tlsa_record}'
+            for tlsa_record in dns_resolve_rrset(f'_25._tcp.{mx_target}', 'TLSA')
         ]
         if not tlsa:
             continue
@@ -193,7 +191,7 @@ def exim_error2tlsrpt_error(error):
     for ign in [ 'SMTP timeout ', 'SMTP error from remote mail server ' ]:
         if error.startswith(ign):
             return None
-    warn('Unknown error string "%s"!' % error)
+    warn(f'Unknown error string "{error}"!')
     return 'validation-failure'
 
 def parse_exim_errors(lines):
@@ -204,7 +202,7 @@ def parse_exim_errors(lines):
     for curline in lines:
         error_match = re.match(error_re, curline)
         if not error_match:
-            warn('Failed to match error line against "%s":\n%s' % (error_re, curline))
+            warn(f'Failed to match error line against "{error_re}":\n{curline}')
             continue
         #f_email  = error_match.group('email')
         f_mxhost = error_match.group('mxhost')
@@ -271,7 +269,7 @@ def send_mail(rua_address, report, fake=False):
     # pylint: disable=too-many-locals
     cur_domain = report['policies'][0]['policy']['policy-domain']
     smtp_from = args.contact
-    debug('Mailing report to %s (domain:%s)' % (rua_address, cur_domain))
+    debug(f'Mailing report to {rua_address} (domain:{cur_domain})')
     smtp_to = [rua_address] if not fake else []
     if args.bcc:
         smtp_to += args.bcc.split(',')
@@ -285,11 +283,11 @@ def send_mail(rua_address, report, fake=False):
     )
     msg['To'] = rua_address
     # XXX:fixme: make this configurable # pylint: disable=fixme
-    msg['From'] = 'SMTP TLS Report by %s <%s>' % (args.org_name, smtp_from)
+    msg['From'] = f'SMTP TLS Report by {args.org_name} <{smtp_from}>'
     msg['TLS-Report-Domain'] = cur_domain
     msg['TLS-Report-Submitter'] = args.org_domain
 
-    body  = 'This is an aggregate TLS report from %s\n' % args.org_domain
+    body  = f'This is an aggregate TLS report from {args.org_domain}\n'
     body += '\n'
     body += 'For your convenience:\n'
     body += json.dumps(report, indent=4)
@@ -319,7 +317,7 @@ def send_mail(rua_address, report, fake=False):
     with smtplib.SMTP(host='localhost') as smtp:
         failed_recipients = smtp.sendmail(smtp_from, smtp_to, msg.as_string())
         if len(failed_recipients) > 0:
-            warn('Failed to send mail to: %s' % failed_recipients)
+            warn(f'Failed to send mail to: {failed_recipients}')
 
 def mail_report(rua_value, report):
     # pylint: disable=missing-function-docstring
@@ -349,25 +347,25 @@ def post_report(rua_address, report):
     if args.no_posts:
         return
     cur_domain = report['policies'][0]['policy']['policy-domain']
-    debug('POSTing report to %s (domain:%s)' % (rua_address, cur_domain))
+    debug(f'POSTing report to {rua_address} (domain:{cur_domain})')
     headers =  {'Content-Type': 'application/tlsrpt+gzip'}
     report_json = json.dumps(report)
     report_gz = gzip.compress(report_json.encode())
     if args.dry_run:
         print('\n'.join([
             DEBUG_SEP,
-            'POST %s headers=%s\n%s\n' % (rua_address, headers, json.dumps(report, indent=4)),
+            f'POST {rua_address} headers={headers}\n{json.dumps(report, indent=4)}\n',
             DEBUG_SEP
         ]))
         return
-    send_mail('POST@%s' % re.sub(r'[/?&]', '.', rua_address[8:]), report, fake=True)
+    send_mail(f"POST@{re.sub('[/?&]', '.', rua_address[8:])}", report, fake=True)
     try:
         response = requests.post(rua_address, data=report_gz, headers=headers, timeout=60)
     except requests.exceptions.ConnectionError as connerr:
-        warn('POST to "%s" failed with ConnectionError: %s' % (rua_address, connerr))
+        warn(f'POST to "{rua_address}" failed with ConnectionError: {connerr}')
         return
     except requests.exceptions.Timeout as timeouterr:
-        warn('POST to "%s" failed with Timeout: %s' % (rua_address, timeouterr))
+        warn(f'POST to "{rua_address}" failed with Timeout: {timeouterr}')
         return
     if not response.ok:
         warn(
@@ -401,7 +399,7 @@ def send_report(data):
         https=post_report,
     )
     if method not in rua_methods:
-        warn('Unsupported rua method "%s" in rua "%s"!' % (method, rua_value))
+        warn(f'Unsupported rua method "{method}" in rua "{rua_value}"!')
         return
     rua_methods[method](rua_value, gen_report(data))
 
@@ -521,7 +519,7 @@ for logfile in args.logfiles:
                 #warn('Ignoring domain %s without rua set: %s' % (domain, line))
                 continue
             if rua == '':
-                warn('Ignoring domain %s without rua set to "": %s' % (domain, line))
+                warn(f'Ignoring domain {domain} without rua set to "": {line}')
                 continue
             tlsrpt_data[domain]['logs'].append(dict(
                 line = line,
