@@ -6,6 +6,10 @@ a report generator for TLSRPT report (RFC8460) using exim logs
 
 # I use 'return' to visualize end of functions and to help emacs get indentation right
 # pylint: disable=useless-return
+# using dict() instead of {} avoids much quoting
+# pylint: disable=use-dict-literal
+# we currently do not use f-strings yet
+# pylint: disable=consider-using-f-string
 
 import sys
 import argparse
@@ -31,24 +35,28 @@ def warn(msg):
 
 def debug(msg):
     # pylint: disable=missing-function-docstring
+    if not args.verbose:
+        return
     print(msg)
     return
 
 # initialize the fields of out tlsrpt data
-tlsrpt_struct = lambda: dict(
-    id=None,
-    domain=None,
-    policy='not stored',
-    policy_type='sts',
-    mode=None,
-    mx=[],
-    report=None,
-    expire=None,
-    needsreport=False,
-    logs=[],
-    deliveries=[],
-    errors=[],
-)
+def tlsrpt_struct():
+    # pylint: disable=missing-function-docstring
+    return dict(
+        id=None,
+        domain=None,
+        policy='not stored',
+        policy_type='sts',
+        mode=None,
+        mx=[],
+        report=None,
+        expire=None,
+        needsreport=False,
+        logs=[],
+        deliveries=[],
+        errors=[],
+    )
 tlsrpt_data = defaultdict(tlsrpt_struct)
 error_domains = set()
 
@@ -354,9 +362,12 @@ def post_report(rua_address, report):
         return
     send_mail('POST@%s' % re.sub(r'[/?&]', '.', rua_address[8:]), report, fake=True)
     try:
-        response = requests.post(rua_address, data=report_gz, headers=headers)
-    except requests.exceptions.ConnectionError as ex:
-        warn('POST to "%s" failed with ConnectionError: %s' % (rua_address, ex))
+        response = requests.post(rua_address, data=report_gz, headers=headers, timeout=60)
+    except requests.exceptions.ConnectionError as connerr:
+        warn('POST to "%s" failed with ConnectionError: %s' % (rua_address, connerr))
+        return
+    except requests.exceptions.Timeout as timeouterr:
+        warn('POST to "%s" failed with Timeout: %s' % (rua_address, timeouterr))
         return
     if not response.ok:
         warn(
@@ -429,8 +440,6 @@ startdate = datetime.date.fromisoformat(args.date)
 starttime = datetime.datetime.fromisoformat(startdate.isoformat())
 endtime   = starttime + datetime.timedelta(days=1) - datetime.timedelta(seconds=1)
 DEBUG_SEP = '='*200
-if not args.verbose:
-    debug = lambda a: None
 
 
 # open LMDB database
@@ -548,7 +557,7 @@ for domain, tlsrpt in tlsrpt_data.items():
             continue
         #warn('line: %s' % logentry['line'])
         # flag domain needs reporting
-        tlsrpt_data[domain]['needsreport'] = True
+        tlsrpt['needsreport'] = True
         # store log line in 'deliveries' resp. 'errors'
         tlsrpt['deliveries' if logentry['delivered'] else 'errors'].append(logentry['line'])
     # skip domains, that do not need a report (no logs found)
