@@ -76,6 +76,9 @@ def get_tlsrpt_rua(domain): # pylint: disable=redefined-outer-name
         if not record.startswith('"v=TLSRPTv1;'):
             continue
         tlsrpt_value = record[12:-1].strip()
+        if tlsrpt_value.endswith(';'):
+            # RFC8460 allows an optional ';' at the end
+            tlsrpt_value = tlsrpt_value[:-1].strip()
         if re.match('.*[ ;]', tlsrpt_value):
             warn('Illegal TLSRPT record of domain %s: %s' % (domain, record))
             continue
