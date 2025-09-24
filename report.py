@@ -246,6 +246,7 @@ def gen_report(data):
             "end-datetime":   endtime.strftime('%Y-%m-%dT%H:%M:%SZ'),
         },
         "contact-info": args.contact,
+        # pylint: disable=consider-using-f-string # printf format better readable
         "report-id": "%s@%s" % (
             localtz2utc( datetime.datetime.now() ).strftime('%Y-%m-%dT%H:%M:%SZ'),
             args.org_domain
@@ -264,24 +265,24 @@ def gen_report(data):
         report['policies'][0]['failure-details'] = failure_details
     return report
 
-def send_mail(rua_address, report, fake=False):
+def send_mail(rua_addresses, report, fake=False):
     # pylint: disable=missing-function-docstring
     # pylint: disable=too-many-locals
     cur_domain = report['policies'][0]['policy']['policy-domain']
     smtp_from = args.contact
-    debug(f'Mailing report to {rua_address} (domain:{cur_domain})')
-    smtp_to = [rua_address] if not fake else []
+    debug(f'Mailing report to {rua_addresses} (domain:{cur_domain})')
+    smtp_to = rua_addresses if not fake else []
     if args.bcc:
         smtp_to += args.bcc.split(',')
 
     msg = email.mime.multipart.MIMEMultipart(_subtype='report')
     msg.set_param('report-type', 'tlsrpt')
-    msg['Subject'] = 'Report Domain: %s Submitter: %s Report-ID: <%s>' % (
-        cur_domain,
-        args.org_domain,
-        report['report-id'],
+    msg['Subject'] = (
+        f"Report Domain: {cur_domain} "
+        f"Submitter: {args.org_domain} "
+        f"Report-ID: <{report['report-id']}>"
     )
-    msg['To'] = rua_address
+    msg['To'] = ', '.join(rua_addresses)
     # XXX:fixme: make this configurable # pylint: disable=fixme
     msg['From'] = f'SMTP TLS Report by {args.org_name} <{smtp_from}>'
     msg['TLS-Report-Domain'] = cur_domain
@@ -296,11 +297,9 @@ def send_mail(rua_address, report, fake=False):
 
     report_json = json.dumps(report)
     report_gz = gzip.compress(report_json.encode())
-    filename = '%s!%s!%s!%s!001.json.gz' % (
-        args.org_domain,
-        cur_domain,
-        int(starttime.timestamp()),
-        int(endtime.timestamp()),
+    filename = (
+        f'{args.org_domain}!{cur_domain}!{int(starttime.timestamp())}!'
+        f'{int(endtime.timestamp())}!001.json.gz'
     )
     mime_report = email.mime.application.MIMEApplication(report_gz, _subtype='tlsrpt+gzip')
     mime_report.add_header('content-disposition', 'attachment', filename=filename)
@@ -319,13 +318,13 @@ def send_mail(rua_address, report, fake=False):
         if len(failed_recipients) > 0:
             warn(f'Failed to send mail to: {failed_recipients}')
 
-def mail_report(rua_value, report):
+def mail_report(rua_values, report):
     # pylint: disable=missing-function-docstring
     if args.no_mails:
         return
     # strip 'mailto:' prefix
-    rua_email = rua_value[7:]
-    send_mail(rua_email, report)
+    rua_emails = [val[7:] for val in rua_values]
+    send_mail(rua_emails, report)
     return
 
 # HTTP debugging
@@ -342,67 +341,68 @@ def mail_report(rua_value, report):
 #requests_log = logging.getLogger("requests.packages.urllib3")
 #requests_log.setLevel(logging.DEBUG)
 
-def post_report(rua_address, report):
+def post_report(rua_addresses, report):
     # pylint: disable=missing-function-docstring
     if args.no_posts:
         return
     cur_domain = report['policies'][0]['policy']['policy-domain']
-    debug(f'POSTing report to {rua_address} (domain:{cur_domain})')
+    debug(f'POSTing report to {rua_addresses} (domain:{cur_domain})')
     headers =  {'Content-Type': 'application/tlsrpt+gzip'}
     report_json = json.dumps(report)
     report_gz = gzip.compress(report_json.encode())
-    if args.dry_run:
-        print('\n'.join([
-            DEBUG_SEP,
-            f'POST {rua_address} headers={headers}\n{json.dumps(report, indent=4)}\n',
-            DEBUG_SEP
-        ]))
-        return
-    send_mail(f"POST@{re.sub('[/?&]', '.', rua_address[8:])}", report, fake=True)
-    try:
-        response = requests.post(rua_address, data=report_gz, headers=headers, timeout=60)
-    except requests.exceptions.ConnectionError as connerr:
-        warn(f'POST to "{rua_address}" failed with ConnectionError: {connerr}')
-        return
-    except requests.exceptions.Timeout as timeouterr:
-        warn(f'POST to "{rua_address}" failed with Timeout: {timeouterr}')
-        return
-    if not response.ok:
-        warn(
-            'POST to "%s" failed with %s %s: %s' % (
-                rua_address,
-                response.status_code,
-                response.reason,
-                response.text
+    for rua_address in rua_addresses:
+        if args.dry_run:
+            print('\n'.join([
+                DEBUG_SEP,
+                f'POST {rua_address} headers={headers}\n{json.dumps(report, indent=4)}\n',
+                DEBUG_SEP
+            ]))
+            continue
+        send_mail(f"POST@{re.sub('[/?&]', '.', rua_address[8:])}", report, fake=True)
+        try:
+            response = requests.post(rua_address, data=report_gz, headers=headers, timeout=60)
+        except requests.exceptions.ConnectionError as connerr:
+            warn(f'POST to "{rua_address}" failed with ConnectionError: {connerr}')
+            continue
+        except requests.exceptions.Timeout as timeouterr:
+            warn(f'POST to "{rua_address}" failed with Timeout: {timeouterr}')
+            continue
+        if not response.ok:
+            warn(
+                f'POST to "{rua_address}" failed with {response.status_code} '
+                f'{response.reason}: {response.text}'
             )
-        )
-        return
     return
 
 def send_report(data):
     # pylint: disable=missing-function-docstring
     if data['policy_type'] == 'none':
         return
-    rua_value = data['report']
-    try:
-        method, _ = rua_value.split(':', maxsplit=1)
-    except ValueError:
-        # workaround for buggy db data before substr(,7) fix
-        if rua_value.startswith('/'):
-            method = 'https'
-            rua_value = 'https:/'+rua_value
-        else:
-            method = 'mailto'
-            rua_value = 'mailto:'+rua_value
+    rua_values = data['report']
     rua_methods = dict(
         mailto=mail_report,
         https=post_report,
     )
-    if method not in rua_methods:
-        warn(f'Unsupported rua method "{method}" in rua "{rua_value}"!')
-        return
-    rua_methods[method](rua_value, gen_report(data))
-
+    tasks = defaultdict(list)
+    for rua_value in rua_values.split(','):
+        rua_value = rua_value.strip()
+        try:
+            method, _ = rua_value.split(':', maxsplit=1)
+        except ValueError:
+            # workaround for buggy db data before substr(,7) fix
+            if rua_value.startswith('/'):
+                method = 'https'
+                rua_value = 'https:/'+rua_value
+            else:
+                method = 'mailto'
+                rua_value = 'mailto:'+rua_value
+        if method not in rua_methods:
+            warn(f'Unsupported rua method "{method}" in rua "{rua_value}"!')
+            continue
+        tasks[method].append(rua_value)
+    for method, rua_values in tasks.items():
+        rua_methods[method](rua_values, gen_report(data))
+    return
 
 
 # ARGUMENTS
