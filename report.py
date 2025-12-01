@@ -292,7 +292,12 @@ def send_mail(rua_addresses, report, fake=False):
     body += '\n'
     body += 'For your convenience:\n'
     body += json.dumps(report, indent=4)
-    mime_body = email.mime.text.MIMEText(body)
+    # from https://stackoverflow.com/questions/14939018/encode-mimetext-as-quoted-printables
+    # Construct a new charset which uses Quoted Printables (base64 is default)
+    charset = email.charset.Charset('utf-8')
+    charset.body_encoding = email.charset.QP
+    # Now set the content using the new charset
+    mime_body = email.mime.text.MIMEText(body, _charset=charset)
     msg.attach(mime_body)
 
     report_json = json.dumps(report)
