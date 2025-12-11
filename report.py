@@ -363,7 +363,7 @@ def post_report(rua_addresses, report):
                 DEBUG_SEP
             ]))
             continue
-        send_mail(f"POST@{re.sub('[/?&]', '.', rua_address[8:])}", report, fake=True)
+        send_mail([f"POST@{re.sub('[/?&]', '.', rua_address[8:])}"], report, fake=True)
         try:
             response = requests.post(rua_address, data=report_gz, headers=headers, timeout=60)
         except requests.exceptions.ConnectionError as connerr:
