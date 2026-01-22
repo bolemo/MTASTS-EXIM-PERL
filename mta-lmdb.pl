@@ -1,238 +1,339 @@
 #!/usr/bin/perl
 
+# (C) 2026 Patrick Cernko
+# This is a reimplementation of mta-lmdb.pl from https://github.com/Bobberty/MTASTS-EXIM-PERL
+# after forking and fixing it in 2023.
+
+use strict;
+use DateTime;
+use Mail::STS;
 
 
+# settings
+our $MTASTS_DEBUG;
+our $MTASTS_LMDB_PATH;
 
 
-
-# The full power of MTA-STS
-
-# MIT License
-
-# Copyright (c) 2019 Jeff Forsyth
-
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions:
-
-# The above copyright notice and this permission notice shall be included in all
-# copies or substantial portions of the Software.
-
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-# SOFTWARE.
+# internal functions, declared here, defined below
+sub _mtasts_debug($);
+sub _mtasts_warning($);
+sub _mtasts_sts_query($);
+sub _mtasts_sts_load_policy($);
+sub _mtasts_db_query($$);
+sub _mtasts_db_save($$$$);
 
 
+# main API functions
 
+# returns the policy for exim to use for a given domain as string:
+# - fail
+# - dane
+# - none
+# - testing
+# - enforce
+# Input: the DNS domain to test MTA-STS for
+sub mtasts_policy($) {
+    my ($domain) = @_;
 
+    _mtasts_debug('mtasts_policy('.$domain.')');
 
+    # ensure domain is only lowercase
+    $domain = lc($domain);
 
+    # query STS for $domain
+    my $STS = _mtasts_sts_query($domain);
+    if ($STS->{dane}) {
+        _mtasts_debug('mtasts_policy('.$domain.'): returning "dane": DANE is primary');
+        return 'dane';
+    }
 
+    # get the current time for later computations
+    my $now = DateTime->now()->epoch;
 
-# getmta is a subroutine that performs a MTA-STS lookup.
-# This system will return a mode and a return value.
-# The mode can be dane, none, enforce, testing or fail.
-# If the result is enforce or testing, the return value will contain allowed mx servers.
+    # now open the database ...
+    my $DB = _mtasts_db_query($domain, $now);
+    if (! defined($DB)) {
+        _mtasts_debug('mtasts_policy('.$domain.'): returning "fail": could not init DB');
+        return 'fail';
+    }
 
-sub getmta
-{
+    # If there is a Policy in the DB and the MTA-STS version in the DNS is valid, check if the version numbers are the same.
+    if ($DB->{valid} && $STS->{id} && ($DB->{id} == $STS->{id})) {
+        # Policy in the DB is good and it hasn't expired.
+        # Current policy found in the DB. Send the current mode.
+        _mtasts_debug('mtasts_policy('.$domain.'): returning "'.$DB->{mode}.'" from DB');
+        return $DB->{mode};
+    }
 
-	use strict;
-	use LMDB_File qw(:flags :cursor_op);
-	use File::Path qw(make_path remove_tree);
-	use Mail::STS;
-	use DateTime;
-	use List::Util qw (any);
-	my $domainname = lc shift;
-	my $hostname = lc shift;
+    # If not, check if there is a STS id
+    if (! $STS->{id}) {
+        # No Policy in the DB and there is no MTA-STS record in the DNS.
+        _mtasts_debug('mtasts_policy('.$domain.'): returning "none": No Policy in the DB and there is no MTA-STS record in the DNS');
+        return 'none';
+    }
 
-	my $TimeEpoch = DateTime->now()->epoch;
-	my $path = '/var/spool/exim4/lmdb2';
+    # No Policy in the DB or the policy in the DB is bad, but the MTA-STS version in the DNS is valid.
+    # load the policy
+    $STS = _mtasts_sts_load_policy($STS);
+    # check if loading failed
+    if (defined($STS->{policy_fail})) {
+        if ($STS->{policy} == 'none') {
+            _mtasts_debug('mtasts_policy('.$domain.'): returning "none": good MTA-STS DNS entry but no policy available from cache or http');
+        } elsif ($STS->{policy} == 'fail') {
+            _mtasts_debug('mtasts_policy('.$domain.'): returning "fail": badly formatted policy');
+        } else {
+            _mtasts_debug('mtasts_policy('.$domain.'): returning "fail": unknown result from _mtasts_sts_load_policy()');
+            return 'fail';
+        }
+        return $STS->{policy_fail};
+    };
 
-        Exim::debug_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'")');
+    # and save in DB
+    _mtasts_db_save($DB, $domain, $STS, $now);
 
-# Fail quickly if there is no database or access to the database.
-	eval { make_path( $path, { mode => 0750 } ); 1} or do {
-            Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning "fail": failed to create db path "'.$path.'".');
-            return ('fail');
-        };
-
-	my $env = LMDB::Env->new($path, {
-		mapsize => 100 * 1024 * 1024 * 1024,
-		mode   => 0660,
-	});
-
-	my $txn = $env->BeginTxn();
-	if (! $hostname) {
-# Setup the vars and Mail::STS
-
-		my $sts = Mail::STS->new;
-		my $domain = $sts->domain($domainname);
-
-		my ($DANE,$STSID, $Output, $policy, $domainReport, $policyMX, $policyMODE,
-			$policyMAX, $policyMXArray, $ExpireTime, $idfromDB, $STSID, $BADID, $policy_string );
-
-# Stop processing quickly if the domain has a TLSA record that identifies as DANE
-		eval { $DANE = $domain->tlsa; };
-		if ( $DANE ) {
-			$txn->commit;
-# Dane is primary. Exit out and depend on Dane
-                        Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning "dane": DANE is primary');
-			return ('dane')
-		;}
-
-# Set the default of all good
-		my $PolicyinDB = 1;
-		my $PolicyinDBgood = 1;
-
-# Setup the Databases
-
-		my $mtaDB = $txn->OpenDB( {    # Open/Create a database for the Policy ID
-			flags => MDB_CREATE
-		});
-
-# Use the Expiration time to check if the record in the db is proper.  Then check to see if it is expired.
-		eval {
-			$ExpireTime = $mtaDB->get("${domainname}:expire");
-		 	$PolicyinDBgood = ($ExpireTime > $TimeEpoch) ? 1:0;
-		} or do { $PolicyinDB = 0; };
-
-# Use the STS id from the DNS to determind if there is an MTS-STS DNS Record
-		eval {
-			$domain->sts;
-			$STSID = $domain->sts->id;
-		} or do { $STSID = 0 };
-
-
-# Only if there is a Policy in the DB and the MTA-STS version in the DNS is valid, check if the version numbers are the same.
-# If not, reload the policy in the DB.
-		if ( $PolicyinDB ) {
-			$idfromDB = $mtaDB->get("${domainname}:id");
-			if ( $STSID ) {
-				if ($idfromDB != $STSID) { $PolicyinDBgood = 0 }
-			}
-		}
-
-# No Policy in the DB or the policy in the DB is bad, load the policy into the DB only if the MTA-STS version in the DNS is valid.
-# Fail if the Policy can't be read
-		if ( (!$PolicyinDB || !$PolicyinDBgood) && $STSID ) {
-			eval { $policy = $domain->policy; } or do {
-				$txn->commit;
-# Found a good MTA-STS DNS entry and no policy is available from the cache or http
-                                # https://www.rfc-editor.org/rfc/rfc8461#section-3.3:
-                                #    If a valid TXT record is found but no policy can be fetched via HTTPS
-                                #   (for any reason), and there is no valid (non-expired) previously
-                                #   cached policy, senders MUST continue with delivery as though the
-                                #   domain has not implemented MTA-STS.
-                                Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning "none": good MTA-STS DNS entry but no policy available from cache or http');
-				return ('none');
-			};
-# Check for badly formatted Policy
-			eval {
-				$policyMXArray = $policy->mx;
-				$policyMX = "@$policyMXArray";
-				$policyMX =~s/ /:/g;
-				$policyMODE = $policy->mode;
-				$policyMAX = ($policy->max_age + $TimeEpoch);
-                                $policy_string = $policy->as_string;
-			} or do {
-				$txn->commit;
-# Found some aspects of a policy, but it is badly formatted
-                                Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning "fail": badly formatted policy');
-				return ('fail');
-			};
-
-			eval { $domainReport = $domain->tlsrpt->rua; };
-
-			$mtaDB->put("${domainname}:mode",$policyMODE,MDB_NODUPDATA);
-			$mtaDB->put("${domainname}:mx","$policyMX",MDB_NODUPDATA);
-			$mtaDB->put("${domainname}:expire",$policyMAX,MDB_NODUPDATA);
-			$mtaDB->put("${domainname}:id",$STSID,MDB_NODUPDATA);
-			$mtaDB->put("${domainname}:report",$domainReport,MDB_NODUPDATA);
-			$mtaDB->put("${domainname}:policy",$policy_string,MDB_NODUPDATA);
-			$txn->commit;
-# Loaded the DB with a proper policy.  Send the current mode and have a nice day.
-                        Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning "'.$policyMODE.'" (after updating DB)');
-			return "$policyMODE";
-		}
-
-# Policy in the DB is good and it hasn't expired.
-		if ( $PolicyinDB && $PolicyinDBgood ) {
-			$policyMODE = $mtaDB->get("${domainname}:mode");
-			$policyMX = $mtaDB->get("${domainname}:mx");
-			$txn->commit;
-# Current policy found in the DB.  Send the current mode.
-                        Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning "'.$policyMODE.'" from DB');
-			return "$policyMODE";
-		}
-
-# No Policy in the DB and there is no MTA-STS record in the DNS.
-		$txn->commit;
-                Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning "none": No Policy in the DB and there is no MTA-STS record in the DNS');
-		return ('none');
-	} else {
-
-# A hostname has been found in the options.  Check to see if the hostname is proper for the domainname.
-
-		my $mtaDB = $txn->OpenDB( {    # Open/Create a database for the MX records in the Policy
-	    		flags => MDB_CREATE
-		});
-		my $policyMX = $mtaDB->get("${domainname}:mx");
-		$txn->commit;
-
-		my %charmap = (
-			'.' => '\.',
-			'*' => '.*',
-			':' => ':',
-		);
-		$policyMX =~ s{(.)} { $charmap{$1} || "\Q$1" }ge;
-		my @HostNameListArray = split /:/, $policyMX;
-		my $bool;
-		$bool = any { $hostname=~$_ } @HostNameListArray;
-		if ($bool) {
-                    Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning "": hostname "'.$hostname.'" in policyMX="'.$policyMX.'"');
-                    return ("");
-                }
-                Exim::log_write('mta-lmdb.pl::getmta(domainname="'.$domainname.'", hostname="'.$hostname.'"): returning 0: hostname "'.$hostname.'" NOT IN policyMX="'.$policyMX.'"');
- 		return (0);
-	}
+    # Loaded the DB with a proper policy.  Send the current mode and have a nice day.
+    _mtasts_debug('mtasts_policy('.$domain.'): returning "'.$STS->{mode}.'" (after updating DB)');
+    return $STS->{mode};
 }
 
-# Simply return the MX records in the policy for limiting in EXIM
-sub getmx
-{
-	use strict;
-	use LMDB_File qw(:flags :cursor_op);
-	my $domainname = lc shift;
-	my $path = '/var/spool/exim4/lmdb2';
+# returns an empty string if the given hostname for the given domain matches the MX entry of the STS policy
+# or a string describing the reason otherwise (DB error, entry not found, hostname does not match MX entry)
+# return value is suiteable for use in the `event_action` directive in exim
+# you should not use this function without calling mtasts_policy($domain) before
+sub mtasts_valid_mx($$) {
+    my ($domain, $host) = @_;
 
-        Exim::debug_write('mta-lmdb.pl::getmx(domainname="'.$domainname.'")');
+    _mtasts_debug('mtasts_valid_mx('.$domain.', '.$host.')');
 
-# Fail quickly if there is no database or access to the database.
-	eval { make_path( $path, { mode => 0750 } ); 1} or do {
-            Exim::log_write('mta-lmdb.pl::getmx(domainname="'.$domainname.'"): returning "fail": failed to create db path "'.$path.'".');
-            return ('fail');
-        };
+    my $DB = _mtasts_db_query($domain, 0);
+    if (! defined($DB)) {
+        _mtasts_debug('mtasts_valid_mx('.$domain.'): returning 0: could not init DB');
+        return 'do_not_connect:DB_error';
+    }
+    if (! $DB->{valid}) {
+        _mtasts_warning('mtasts_valid_mx('.$domain.'): returning 0: no valid entry in DB');
+        return 'do_not_connect:no_entry';
+    }
 
-	my $env = LMDB::Env->new($path, {
-		mapsize => 100 * 1024 * 1024 * 1024,
-		mode   => 0660,
-	});
+    my @mx = @{$DB->{mx}};
+    foreach my $mxhost (@mx) {
+        my $mxmatch = $mxhost;
+        $mxmatch =~ s/\./[.]/g;
+        $mxmatch =~ s/\*/.+/g;
+        if ($host =~ $mxmatch) {
+            _mtasts_debug('mtasts_valid_mx('.$domain.', '.$host.'): returning "": host "'.$host.'" in MX list: ["'.join('", "', @mx).'"], matching mx: '.$mxhost);
+            return '';
+        }
+    }
+    _mtasts_debug('mtasts_valid_mx('.$domain.', '.$host.'): returning 0: host "'.$host.'" NOT in MX list: ["'.join('", "', @mx).'"]');
+    return 'do_not_connect:no_match';
+}
 
-	my $txn = $env->BeginTxn();
-	my $mtaDB = $txn->OpenDB( {    # Open/Create a database for the MX records in the Policy
-	    	flags => MDB_CREATE
-	});
+# return the MX records in the policy for a given domain as a exim hostlist
+# you should not use this function without calling mtasts_policy($domain) before
+sub mtasts_mx_hostlist($) {
+    my ($domain) = @_;
 
-	my $mxReturn = $mtaDB->get("${domainname}:mx");
-	$txn->commit;
-        Exim::log_write('mta-lmdb.pl::getmx(domainname="'.$domainname.'"): returning "'.$mxReturn.'".');
-	return ($mxReturn);
+    _mtasts_debug('mtasts_mx_hostlist('.$domain.')');
+
+    # Fail quickly if there is no database or access to the database.
+    my $DB = _mtasts_db_query($domain, 0);
+    if (! defined($DB)) {
+        _mtasts_debug('mtasts_mx_hostlist('.$domain.'): returning "fail": could not init DB');
+        return 'fail';
+    }
+    if (! $DB->{valid}) {
+        _mtasts_warning('mtasts_mx_hostlist('.$domain.'): returning "fail": no valid entry in DB');
+        return 'fail';
+    }
+
+    my @mx = @{$DB->{mx}};
+    my $hostlist = join(':', @mx);
+
+    _mtasts_debug('mtasts_mx_hostlist('.$domain.'): returning "'.$hostlist.'"');
+    return $hostlist;
+}
+
+
+# backward compatibility
+sub getmta(@) {
+    _mtasts_warning('getmta() is deprecated. Please switch to mtasts_policy() resp. mtasts_valid_mx() API!');
+    my ($domain, $host) = @_;
+    if (int(@_) eq 2) {
+        return mtasts_valid_mx($domain, $host);
+    }
+    return mtasts_policy($domain);
+}
+
+sub getmx($) {
+    _mtasts_warning('getx() is deprecated. Please switch to mtasts_mx_hostlist() API!');
+    my ($domain) = @_;
+    return mtasts_mx_hostlist($domain);
+}
+
+
+# definition of internal functions declared above
+sub _mtasts_debug($) {
+    my ($msg) = @_;
+
+    if (defined($MTASTS_DEBUG) && ($MTASTS_DEBUG eq 0)) {
+        return;
+    }
+    # XXX:fixme: assume running in exim if stdout is not a tty
+    if (-t 1) {
+        print $msg."\n";
+    } else {
+        Exim::log_write($msg);
+    }
+}
+
+sub _mtasts_warning($) {
+    my ($msg) = @_;
+
+    # XXX:fixme: assume running in exim if stderr is not a tty
+    if (-t 2) {
+        print STDERR 'WARNING: '.$msg."\n";
+    } else {
+        Exim::log_write('WARNING: '.$msg);
+    }
+}
+
+sub _mtasts_sts_query($) {
+    my ($domain) = @_;
+
+    my %STS;
+    # query STS for $domain
+    $STS{sts} = Mail::STS->new;
+    $STS{domain} = $STS{sts}->domain($domain);
+    # if $domain has TLSA setting, it's using DANE, no need to go further
+    eval {
+        $STS{dane} = $STS{domain}->tlsa;
+    };
+    if ($STS{dane}) {
+        return \%STS;
+    }
+
+    # analyse STS
+    eval {
+        $STS{domain}->sts;
+        $STS{id} = $STS{domain}->sts->id;
+    } or do {
+        $STS{id} = 0;
+    };
+    eval {
+        $STS{rua} = $STS{domain}->tlsrpt->rua;
+    };
+
+    return \%STS;
+}
+
+sub _mtasts_sts_load_policy($) {
+    my ($STS) = @_;
+
+    my $policy;
+    eval {
+        $policy = $STS->{domain}->policy;
+    } or do {
+        $STS->{policy_fail} = 'none';
+        return $STS;
+    };
+
+    eval {
+        $STS->{mx}      = $policy->mx;
+        $STS->{mode}    = $policy->mode;
+        $STS->{max_age} = $policy->max_age;
+        $STS->{policy}  = $policy->as_string;
+    } or do {
+        # Found some aspects of a policy, but it is badly formatted
+        $STS->{policy_fail} = 'fail';
+    };
+
+    return $STS;
+}
+
+sub _mtasts_lmdb_init() {
+    # load LMDB_File instead of globally in case not needed
+    # to avoid errors if not installed
+    use LMDB_File qw(:flags :cursor_op);
+    use File::Path qw(make_path);
+    my $path = $MTASTS_LMDB_PATH;
+
+    # create the path hirachy, handle any error
+    make_path($path, { error => \my $err });
+    # error handling as described in LMDB_File documentation
+    if ($err && @$err) {
+        for my $diag (@$err) {
+            my ($file, $message) = %$diag;
+            if ($file eq '') {
+                _mtasts_warning('_mtasts_lmdb_init(): general error: '.$message);
+            } else {
+                _mtasts_warning('_mtasts_lmdb_init(): problem unlinking '.$file.': '.$message);
+            }
+        }
+        return undef;
+    }
+
+    my $env;
+    eval {
+        $env = LMDB::Env->new($path, { mapsize => 100 * 1024 * 1024 * 1024 });
+    } or do {
+        _mtasts_warning('_mtasts_lmdb_init(): could not create LMDB env: '.$LMDB_file::last_err);
+        return undef;
+    };
+
+    my $transaction = $env->BeginTxn();
+    if (! defined($transaction)) {
+        _mtasts_warning('_mtasts_lmdb_init(): could not get LMDB transaction: '.$LMDB_file::last_err);
+        return undef;
+    }
+
+    return $transaction->OpenDB({ flags => MDB_CREATE });
+}
+
+sub _mtasts_db_query($$) {
+    my ($domain, $now) = @_;
+
+    my %DB;
+    my $db = _mtasts_lmdb_init();
+    if (! defined($db)) {
+        _mtasts_warning('_mtasts_db_query(): _mtasts_lmdb_init() failed');
+        return undef;
+    }
+    $DB{db} = $db;
+
+    $DB{valid} = 0;
+    eval {
+        $DB{expiry} = $db->get($domain.':expire');
+        $DB{valid} = ($DB{expiry} > $now) ? 1 : 0;
+    } or do {
+        $DB{valid} = 0;
+    };
+    eval {
+        $DB{id}     = $db->get($domain.':id');
+        $DB{mode}   = $db->get($domain.':mode');
+        $DB{report} = $db->get($domain.':report');
+        $DB{policy} = $db->get($domain.':policy');
+        # LMDB only stores strings, split MX by ':'
+        my @mx = split(':', $db->get($domain.':mx'));
+        $DB{mx} = \@mx;
+    } or do {
+        $DB{valid} = 0;
+    };
+
+    return \%DB;
+}
+
+sub _mtasts_db_save($$$$) {
+    my ($DB, $domain, $STS, $now) = @_;
+
+    $DB->{db}->put($domain.':expire', $STS->{max_age}+$now,  MDB_NODUPDATA);
+    $DB->{db}->put($domain.':id',     $STS->{id},            MDB_NODUPDATA);
+    $DB->{db}->put($domain.':mode',   $STS->{mode},          MDB_NODUPDATA);
+    $DB->{db}->put($domain.':report', $STS->{rua},           MDB_NODUPDATA);
+    $DB->{db}->put($domain.':policy', $STS->{policy},        MDB_NODUPDATA);
+    # LMDB only stores strings, join MX array by ':'
+    my $mx = join(':', @{$STS->{mx}});
+    $DB->{db}->put($domain.':mx', $mx, MDB_NODUPDATA);
+
+    $DB->{db}->Txn->commit;
 }
