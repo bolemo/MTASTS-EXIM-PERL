@@ -63,7 +63,7 @@ def dns_resolve_rrset(qname, rdtype):
     resolve a given qname+rdtype and return a set of resource records or an empty set on error
     '''
     try:
-        answer = dns.resolver.resolve(qname, rdtype, search=False)
+        answer = dns.resolver.resolve(qname, rdtype, lifetime=20, search=False)
     except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
         return set()
     # dns.rdtypes.ANY.TXT.TXT's to_text is somehow broken, we parse TXT records better on our own
