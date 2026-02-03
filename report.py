@@ -188,7 +188,12 @@ def exim_error2tlsrpt_error(error):
     }
     if error in errors:
         return errors[error]
-    for ign in [ 'SMTP timeout ', 'SMTP error from remote mail server ' ]:
+    ignored = [
+        'SMTP timeout ',
+        'SMTP error from remote mail server ',
+        'Connection timed out',
+    ]
+    for ign in ignored:
         if error.startswith(ign):
             return None
     warn(f'Unknown error string "{error}"!')
@@ -197,18 +202,22 @@ def exim_error2tlsrpt_error(error):
 def parse_exim_errors(lines):
     # pylint: disable=missing-function-docstring
     errors = defaultdict(int)
-    # 2023-03-10 17:58:55 1paeYC-001MTh-0L == measurement@mail-mtasts-rn-plain.measurement.email-security-scans.org R=dnslookup T=remote_smtp_mtasts_enforce defer (-38) H=plaintext.measurement.email-security-scans.org [2a06:d1c0:dead:3::83] I=[2a06:d1c0:dead:2::182] DT=0s: a TLS session is required, but the server did not offer TLS support # pylint: disable=line-too-long
-    error_re = r'^.+ == (?P<email>\S+) .+ H=(?P<mxhost>\S+) \[(?P<mxip>\S+)\] I=\[(?P<lip>\S+)\].*?: (?P<error>.+)$' # pylint: disable=line-too-long
+    # pylint: disable=line-too-long
+    # 2023-03-10 17:58:55 1paeYC-001MTh-0L == measurement@mail-mtasts-rn-plain.measurement.email-security-scans.org R=dnslookup T=remote_smtp_mtasts_enforce defer (-38) H=plaintext.measurement.email-security-scans.org [2a06:d1c0:dead:3::83] I=[2a06:d1c0:dead:2::182] DT=0s: a TLS session is required, but the server did not offer TLS support
+    # 2026-02-02 04:49:32 1vmkcr-00000003gVc-3F74 == dmarc-rpt@domeneshop.no R=dnslookup T=remote_smtp defer (110): Connection timed out H=mx.domeneshop.no [194.63.252.21] I=[139.19.205.225] DT=2m15s
+    error_re = r'^.+ == (?P<email>\S+) (.+ H=(?P<mxhost>\S+) \[(?P<mxip>\S+)\] I=\[(?P<lip>\S+)\].*?: (?P<error>.+)|.+: (?P<error_alt>.+) H=(?P<mxhost_alt>\S+) \[(?P<mxip_alt>\S+)\] I=\[(?P<lip_alt>\S+)\] .+)$'
+    # pylint: enable=line-too-long
     for curline in lines:
         error_match = re.match(error_re, curline)
         if not error_match:
             warn(f'Failed to match error line against "{error_re}":\n{curline}')
             continue
-        #f_email  = error_match.group('email')
-        f_mxhost = error_match.group('mxhost')
-        f_mxip   = error_match.group('mxip')
-        f_lip    = error_match.group('lip')
-        f_error  = error_match.group('error')
+        alt = '' if error_match.group('error') else '_alt'
+        #f_email  = error_match.group('email'+alt)
+        f_mxhost = error_match.group('mxhost'+alt)
+        f_mxip   = error_match.group('mxip'+alt)
+        f_lip    = error_match.group('lip'+alt)
+        f_error  = error_match.group('error'+alt)
         result_type = exim_error2tlsrpt_error(f_error)
         if result_type is None:
             continue
