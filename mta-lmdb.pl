@@ -120,6 +120,7 @@ sub mtasts_valid_mx($$) {
         my $mxmatch = $mxhost;
         $mxmatch =~ s/\./[.]/g;
         $mxmatch =~ s/\*/.+/g;
+        $mxmatch = '^'.$mxmatch.'$';
         if ($host =~ $mxmatch) {
             _mtasts_debug('mtasts_valid_mx('.$domain.', '.$host.'): returning "": host "'.$host.'" in MX list: ["'.join('", "', @mx).'"], matching mx: '.$mxhost);
             return '';
