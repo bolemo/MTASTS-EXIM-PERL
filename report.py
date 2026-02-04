@@ -54,6 +54,7 @@ def tlsrpt_struct():
         logs=[],
         deliveries=[],
         errors=[],
+        failure_details=[],
     )
 tlsrpt_data = defaultdict(tlsrpt_struct)
 error_domains = set()
@@ -245,9 +246,6 @@ def gen_report(data):
             "policy-string": data['policy'].strip().split('\n'),
             "mx-host":       data['mx'],
         })
-    failure_details = []
-    if len(data['errors']) > 0:
-        failure_details = parse_exim_errors(data['errors'])
     report = {
         "organization-name": args.org_name,
         "date-range": {
@@ -265,13 +263,13 @@ def gen_report(data):
                 "policy": policy,
                 "summary": {
                     "total-successful-session-count": len(data['deliveries']),
-                    "total-failure-session-count": len(failure_details),
+                    "total-failure-session-count": len(data['failure_details']),
                 },
             },
         ],
     }
-    if len(failure_details) > 0:
-        report['policies'][0]['failure-details'] = failure_details
+    if len(data['failure_details']) > 0:
+        report['policies'][0]['failure-details'] = data['failure_details']
     return report
 
 def send_mail(rua_addresses, report, fake=False):
@@ -417,6 +415,14 @@ def send_report(data):
     for method, rua_values in tasks.items():
         rua_methods[method](rua_values, gen_report(data))
     return
+
+def print_tlsrpt(rpt):
+    cp = {}
+    for key, val in rpt.items():
+        if key in ['logs', 'deliveries', 'errors', ]:
+            val = len(val)
+        cp[key] = val
+    print(json.dumps(cp, indent=4))
 
 
 # ARGUMENTS
@@ -575,5 +581,7 @@ for domain, tlsrpt in tlsrpt_data.items():
     # skip domains, that do not need a report (no logs found)
     if not tlsrpt['needsreport']:
         continue
+    # now is a good time to analyse the error logs and store the result in 'failure_details'
+    tlsrpt['failure_details'] = parse_exim_errors(tlsrpt['errors'])
     # send report otherwise
     send_report(tlsrpt)
