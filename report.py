@@ -181,7 +181,7 @@ def dns_resolve_rrset(qname, rdtype):
     '''
     try:
         answer = dns.resolver.resolve(qname, rdtype, lifetime=20, search=False)
-    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer, dns.resolver.NoNameservers):
         return set()
     # dns.rdtypes.ANY.TXT.TXT's to_text is somehow broken, we parse TXT records better on our own
     def rr2text(rr): # pylint: disable=invalid-name
