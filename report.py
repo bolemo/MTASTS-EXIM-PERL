@@ -4,8 +4,9 @@
 a report generator for TLSRPT report (RFC8460) using exim logs
 '''
 
-# I use 'return' to visualize end of functions and to help emacs get indentation right
-# pylint: disable=useless-return
+# I use 'return' and 'pass' to visualize end of functions or classes
+# and to help emacs get indentation right
+# pylint: disable=useless-return disable=unnecessary-pass
 # using dict() instead of {} avoids much quoting
 # pylint: disable=use-dict-literal
 
@@ -21,6 +22,7 @@ import email.mime.text
 import email.mime.application
 import smtplib
 from collections import defaultdict
+from dataclasses import dataclass, field, fields
 
 import lmdb
 import dns.resolver
@@ -38,25 +40,64 @@ def debug(msg):
     print(msg)
     return
 
-# initialize the fields of out tlsrpt data
-def tlsrpt_struct():
-    # pylint: disable=missing-function-docstring
-    return dict(
-        id=None,
-        domain=None,
-        policy='not stored',
-        policy_type='sts',
-        mode=None,
-        mx=[],
-        report=None,
-        expire=None,
-        needsreport=False,
-        logs=[],
-        deliveries=[],
-        errors=[],
-        failure_details=[],
-    )
-tlsrpt_data = defaultdict(tlsrpt_struct)
+@dataclass
+class TLSLogEntry:
+    '''
+    stores one parsed mail log line for TLS report generation
+    '''
+    line: str = None
+    delivered: bool = True
+    recipient: str = None
+    sender: str = None
+    mxhost: str = None
+
+@dataclass
+class TLSRPT:
+    # pylint: disable=too-many-instance-attributes
+    '''
+    store TLS report specific data for one domain
+    '''
+    # pylint: disable=invalid-name
+    id: str = None
+    domain: str = None
+    policy: str = 'not stored'
+    policy_type: str = 'sts'
+    mode: str = None
+    mx: list[str] = field(default_factory=list)
+    # pylint: enable=invalid-name
+    report: str = None
+    expire: str = None
+    needsreport: bool = False
+    logs: list[TLSLogEntry] = field(default_factory=list)
+    deliveries: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    failure_details: list[dict] = field(default_factory=list)
+
+    def store_logentry(self, logline, is_delivered):
+        '''
+        store log line in corresponding store
+        '''
+        store = self.deliveries if is_delivered else self.errors
+        store.append(logline)
+        return
+
+
+    def to_json(self, indent=None):
+        '''
+        convert required data to json representation
+        '''
+        jsondata = {}
+        for member in fields(self):
+            val = getattr(self, member.name)
+            if member.name in ['logs', 'deliveries', 'errors', ]:
+                val = len(val)
+            jsondata[member.name] = val
+        return json.dumps(jsondata, indent=indent)
+
+    pass
+
+
+tlsrpt_data = defaultdict(TLSRPT)
 error_domains = set()
 
 def dns_resolve_rrset(qname, rdtype):
@@ -116,27 +157,24 @@ def non_mtasts_domain(domain): # pylint: disable=redefined-outer-name
     '''
     generate tlsrpt struct for a non-MTA-STS domain
     '''
-    data = tlsrpt_struct()
-    data.update(dict(
+    rpt = TLSRPT(
         domain = domain,
         policy = 'no-policy-found',
         policy_type = 'no-policy-found',
-    ))
+    )
     domain_rua = get_tlsrpt_rua(domain)
     if domain_rua is None:
         # no TLSRPT record: none policy
-        data['policy_type'] = 'none'
-        return data
-    data['report'] = domain_rua
+        rpt.policy_type = 'none'
+        return rpt
+    rpt.report = domain_rua
     tlsa_mx = get_tlsa_mx(domain)
     if len(tlsa_mx) > 0:
         # TLSA records found, DANE in use
-        data.update(dict(
-            policy_type = 'tlsa',
-            policy = ';'.join(tlsa_mx.values()),
-            mx = list(tlsa_mx.keys()),
-        ))
-    return data
+        rpt.policy_type = 'tlsa'
+        rpt.policy = ';'.join(tlsa_mx.values())
+        rpt.mx = list(tlsa_mx.keys())
+    return rpt
 
 def localtz2utc(dt): # pylint: disable=invalid-name
     '''
@@ -235,16 +273,16 @@ def parse_exim_errors(lines):
         for key, count in errors.items()
     ]
 
-def gen_report(data):
+def gen_report(rpt):
     # pylint: disable=missing-function-docstring
     policy = {
-        "policy-type": data['policy_type'],
-        "policy-domain": data['domain'],
+        "policy-type": rpt.policy_type,
+        "policy-domain": rpt.domain,
     }
-    if data['policy_type'] in ['sts', 'tlsa']:
+    if rpt.policy_type in ['sts', 'tlsa']:
         policy.update({
-            "policy-string": data['policy'].strip().split('\n'),
-            "mx-host":       data['mx'],
+            "policy-string": rpt.policy.strip().split('\n'),
+            "mx-host":       rpt.mx,
         })
     report = {
         "organization-name": args.org_name,
@@ -262,14 +300,14 @@ def gen_report(data):
             {
                 "policy": policy,
                 "summary": {
-                    "total-successful-session-count": len(data['deliveries']),
-                    "total-failure-session-count": len(data['failure_details']),
+                    "total-successful-session-count": len(rpt.deliveries),
+                    "total-failure-session-count": len(rpt.failure_details),
                 },
             },
         ],
     }
-    if len(data['failure_details']) > 0:
-        report['policies'][0]['failure-details'] = data['failure_details']
+    if len(rpt.failure_details) > 0:
+        report['policies'][0]['failure-details'] = rpt.failure_details
     return report
 
 def send_mail(rua_addresses, report, fake=False):
@@ -386,11 +424,11 @@ def post_report(rua_addresses, report):
             )
     return
 
-def send_report(data):
+def send_report(rpt):
     # pylint: disable=missing-function-docstring
-    if data['policy_type'] == 'none':
+    if rpt.policy_type == 'none':
         return
-    rua_values = data['report']
+    rua_values = rpt.report
     rua_methods = dict(
         mailto=mail_report,
         https=post_report,
@@ -413,16 +451,8 @@ def send_report(data):
             continue
         tasks[method].append(rua_value)
     for method, rua_values in tasks.items():
-        rua_methods[method](rua_values, gen_report(data))
+        rua_methods[method](rua_values, gen_report(rpt))
     return
-
-def print_tlsrpt(rpt):
-    cp = {}
-    for key, val in rpt.items():
-        if key in ['logs', 'deliveries', 'errors', ]:
-            val = len(val)
-        cp[key] = val
-    print(json.dumps(cp, indent=4))
 
 
 # ARGUMENTS
@@ -470,9 +500,9 @@ with env.begin() as txn:
         k, v = key.decode(), value.decode()
         domain, attr = k.split(':', maxsplit=1)
         # store the domain as part of the 'tlsrpt' struct
-        tlsrpt_data[domain]['domain'] = domain
+        tlsrpt_data[domain].domain = domain
         # store all values in the corresponding attr
-        tlsrpt_data[domain][attr] = v.split(':') if attr == 'mx' else v
+        setattr(tlsrpt_data[domain], attr, v.split(':') if attr == 'mx' else v)
 
 
 # generate a regex from all domains
@@ -534,14 +564,14 @@ for logfile in args.logfiles:
                     )
                     error_domains.add(domain)
                     continue
-            rua = tlsrpt_data[domain]['report']
+            rua = tlsrpt_data[domain].report
             if rua is None:
                 #warn('Ignoring domain %s without rua set: %s' % (domain, line))
                 continue
             if rua == '':
                 warn(f'Ignoring domain {domain} without rua set to "": {line}')
                 continue
-            tlsrpt_data[domain]['logs'].append(dict(
+            tlsrpt_data[domain].logs.append(TLSLogEntry(
                 line = line,
                 delivered = delivered,
                 recipient = recipient,
@@ -549,39 +579,40 @@ for logfile in args.logfiles:
                 mxhost = mxhost,
             ))
             # check if mx hostnames do no match this delivery line
-            if tlsrpt_data[domain]['policy_type'] in ['sts', 'tlsa'] and \
-               not match_mx(mxhost, tlsrpt_data[domain]['mx']):
+            if tlsrpt_data[domain].policy_type in ['sts', 'tlsa'] and \
+               not match_mx(mxhost, tlsrpt_data[domain].mx):
                 warn(
                     f'Warning: Host "{mxhost}" must not be used to deliver to domain "{domain}" '
-                    f'according to policy:\n{tlsrpt_data[domain]["policy_type"]}'
+                    f'according to policy: {tlsrpt_data[domain].policy_type}'
+                    f'mxhosts={tlsrpt_data[domain].mx}'
                 )
 
 
 # iterate over all domains
 for domain, tlsrpt in tlsrpt_data.items():
-    if len(tlsrpt['logs']) == 0:
+    if len(tlsrpt.logs) == 0:
         continue
-    if not tlsrpt['report']:
+    if not tlsrpt.report:
         continue
-    for logentry in tlsrpt['logs']:
-        if logentry['sender'] in [ args.contact ] + ignore_senders:
-            #warn('Ignoring sender: %s' % logentry['sender'])
+    for logentry in tlsrpt.logs:
+        if logentry.sender in [ args.contact ] + ignore_senders:
+            #warn('Ignoring sender: %s' % logentry.sender)
             continue
         if [
                 t for t in tlsrpt_data.values()
-                if t['report'] == 'mailto:'+logentry['recipient']
+                if t.report == 'mailto:'+logentry.recipient
         ]:
-            #warn('Ignoring recipient: %s' % logentry['recipient'])
+            #warn('Ignoring recipient: %s' % logentry.recipient)
             continue
-        #warn('line: %s' % logentry['line'])
+        #warn('line: %s' % logentry.line)
         # flag domain needs reporting
-        tlsrpt['needsreport'] = True
+        tlsrpt.needsreport = True
         # store log line in 'deliveries' resp. 'errors'
-        tlsrpt['deliveries' if logentry['delivered'] else 'errors'].append(logentry['line'])
+        tlsrpt.store_logentry(logentry.line, logentry.delivered)
     # skip domains, that do not need a report (no logs found)
-    if not tlsrpt['needsreport']:
+    if not tlsrpt.needsreport:
         continue
     # now is a good time to analyse the error logs and store the result in 'failure_details'
-    tlsrpt['failure_details'] = parse_exim_errors(tlsrpt['errors'])
+    tlsrpt.failure_details = parse_exim_errors(tlsrpt.errors)
     # send report otherwise
     send_report(tlsrpt)
