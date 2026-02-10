@@ -1,0 +1,24 @@
+# shellcheck disable=SC2034
+
+# required
+contact_email=sender@owndomain
+organization_domain=owndomain
+
+# optional
+# send BCC of reports to:
+#bcc=recipient@domain
+# ignore these senders (',' seperated), e.g. your dmarc-reports sender address
+#ignore_senders=sender@domain
+# ignore these domains on reports, e.g. your own domains?
+#ignore_domains=owndomain1,owndomain2
+#ignore_domains+=,broken-domain.tld # broken DNS setup?
+# redis setup, required for two-step analysis
+#redis_servers=HOST_OR_IP
+# to specify read-write and read-only server use /
+#redis_servers=RWHOST/ROHOST1/ROHOST2
+# if redis requires authentication
+#redis_auth='INSERT_REDIS_PASSWORD'
+
+# Local Variables:
+# mode: sh
+# End:
