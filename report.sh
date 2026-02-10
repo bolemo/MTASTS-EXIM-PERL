@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
 base=${0%/*}
 
@@ -13,17 +13,23 @@ now_sec=$(date +%s)
 # max logfile mtime age in minutes (for find's -mmin)
 mmin=$(( (now_sec - min_sec) / 60 ))
 # find all log files, modified since 5min before $report_date, order by time
-logs=$(find /var/log/exim4/ -name 'mainlog*' -mmin -$mmin -exec ls -tr {} +)
+mapfile -t logs < <(find /var/log/exim4/ -name 'mainlog*' -mmin -$mmin -exec ls -tr {} +)
 
-. $base/report.inc
+ignore_domains=''
+organization_domain=''
+ignore_domains=''
+ignore_senders=''
+redis_servers=''
+redis_auth=''
+. "$base"/report.inc
 
 cmd=(
     python3
-    $base/report.py
+    "$base"/report.py
     --contact "$contact_email"
     --org-domain "$organization_domain"
     --date "$report_date"
-    $logs
+    "${logs[@]}"
 )
 if [ -n "$ignore_domains" ]; then
     cmd+=(
@@ -38,6 +44,16 @@ fi
 if [ -n "$bcc" ]; then
     cmd+=(
         --bcc "$bcc"
+    )
+fi
+if [ -n "$redis_servers" ]; then
+    cmd+=(
+        --redis-servers "$redis_servers"
+    )
+fi
+if [ -n "$redis_auth" ]; then
+    cmd+=(
+        --redis-auth "$redis_auth"
     )
 fi
 cmd+=( "$@" )
