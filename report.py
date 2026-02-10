@@ -23,10 +23,17 @@ import email.mime.application
 import smtplib
 from collections import defaultdict
 from dataclasses import dataclass, field, fields
+import socket
 
 import lmdb
 import dns.resolver
 import requests
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ModuleNotFoundError:
+    REDIS_AVAILABLE = False
+    pass
 
 def warn(msg):
     # pylint: disable=missing-function-docstring
@@ -74,6 +81,20 @@ class TLSRPT:
         self._errors = []
         self._failure_details = []
         return
+
+    def __add__(self, other):
+        if self.domain != other.domain:
+            raise ValueError(
+                f'Cannot add TLSRPT objects for different domains: {self.domain} vs. {other.domain}'
+            )
+        result = TLSRPT()
+        # inherit dataclass fields from self
+        for member in fields(self):
+            setattr(result, member.name, getattr(self, member.name))
+        # combine the list of logs
+        result._logs = self._logs + other._logs
+        # leave other protected members on their initial state
+        return result
 
     def _parse_logs(self, ignore_from, ignore_to):
         for entry in self._logs:
@@ -168,6 +189,19 @@ class TLSRPT:
             failure_details=self._failure_details,
         ))
         return json.dumps(jsondata, indent=indent)
+
+    @classmethod
+    def from_json(cls, jsondata):
+        '''
+        convert json representation TLSRPT obj
+        '''
+        data = json.loads(jsondata)
+        obj = cls()
+        for member in fields(obj):
+            setattr(obj, member.name, data[member.name])
+        obj._deliveries = data.get('deliveries', 0)
+        obj._failure_details = data.get('failure_details', [])
+        return obj
 
     pass
 
@@ -492,31 +526,136 @@ def send_report(rpt):
         rua_methods[method](rua_values, rpt.gen_report())
     return
 
+def redis_connect(write=False):
+    # pylint: disable=missing-function-docstring
+    debug(f'redis_servers={redis_servers}')
+    servers = list(redis_servers)
+    debug(f'servers={servers}')
+    if write:
+        # write only to the first server
+        servers = [ servers[0] ]
+    else:
+        # read from second to last and then first (RW) server
+        servers.append(servers.pop(0))
+    debug(f'servers={servers}')
+    for server in servers:
+        debug(f'redis.Redis(host={server},decode_responses=True)')
+        conn = redis.Redis(host=server, decode_responses=True)
+        if not conn:
+            debug(f'redis.Redis(host={server},decode_responses=True) FAILED, continuing')
+            continue
+        debug(f'redis.Redis(host={server},decode_responses=True) CONNECTED')
+        if args.redis_auth:
+            conn.auth(args.redis_auth)
+        debug(f'redis.Redis(host={server},decode_responses=True) AUTHENTICATED')
+        return conn
+    raise ConnectionError(
+        f'Failed to connect to redis server {servers} ({"read/write" if write else "read-only"})'
+    )
+
+def redis_close(conn):
+    # pylint: disable=missing-function-docstring
+    if not conn:
+        return
+    debug('redis_close()')
+    conn.close()
+    return
+
+def redis_store_report(rpt, conn):
+    # pylint: disable=missing-function-docstring
+    date = datetime.date.fromisoformat(args.date).isoformat()
+    redis_key = f'{REDIS_KEY_PREFIX}:{rpt.domain}:{args.analysis_id}:{date}'
+    if args.dry_run:
+        print(f'conn.set({redis_key}, {rpt.to_json()}, ex={REDIS_LIFETIME})')
+        return
+    debug(f'redis.set({redis_key}, {rpt.to_json()}, ex={REDIS_LIFETIME})')
+    conn.set(redis_key, rpt.to_json(), ex=REDIS_LIFETIME)
+    return
+
+def redis_load_reports():
+    # pylint: disable=missing-function-docstring
+    date = datetime.date.fromisoformat(args.date).isoformat()
+    conn = redis_connect()
+    keys = conn.keys(f'{REDIS_KEY_PREFIX}:*:*:{date}')
+    key_suffix = '_processing' if not args.dry_run else ''
+    reports = {
+        redis_key+key_suffix: conn.get(redis_key)
+        for redis_key in keys
+        if not only_domains or redis_key.split(':')[1] in only_domains
+    }
+    redis_close(conn)
+    if not args.dry_run:
+        suffix_len = len(key_suffix)
+        debug(f'key_suffix={key_suffix}, suffix_len={suffix_len}')
+        conn = redis_connect(write=True)
+        for redis_key in reports.keys():
+            old_redis_key = redis_key[:len(redis_key)-suffix_len]
+            debug(f'redis.rename({old_redis_key}, {redis_key})')
+            conn.rename(old_redis_key, redis_key)
+        redis_close(conn)
+    return reports
+
+def redis_remove_keys(keys):
+    # pylint: disable=missing-function-docstring
+    if not keys:
+        return
+    conn = redis_connect(write=True)
+    if args.dry_run:
+        print(f'conn.delete({keys})')
+        return
+    debug(f'redis.delete({keys})')
+    conn.delete(*keys)
+    redis_close(conn)
 
 # ARGUMENTS
 DEFAULT_LMDB = '/var/spool/exim4/lmdb2/'
 DEFAULT_ORG_DOMAIN = 'invalid'
 DEFAULT_CONTACT = 'smtp-tls-reports@invalid'
+DEFAULT_ANALYSIS_ID = socket.gethostname()
 yesterday = datetime.date.today() - datetime.timedelta(days=1)
 default_only_domains = []
 default_ignore_domains = []
 default_ignore_senders = []
 parser = argparse.ArgumentParser(description='MTA-STS report generator')
-parser.add_argument('--lmdb',       type=str, help="path to mta-lmdb.pl's lmdb database", default=DEFAULT_LMDB)                                                 # pylint: disable=line-too-long
-parser.add_argument('--org-domain', type=str, help='organization domain in reports',      default=DEFAULT_ORG_DOMAIN)                                           # pylint: disable=line-too-long
-parser.add_argument('--org-name',   type=str, help='organization name in reports',        default=DEFAULT_ORG_DOMAIN)                                           # pylint: disable=line-too-long
-parser.add_argument('--contact',    type=str, help='contact info in reports',             default=DEFAULT_CONTACT)                                              # pylint: disable=line-too-long
-parser.add_argument('--date',       type=str, help='ISO date of report (def: yesterday)', default=str(yesterday))                                               # pylint: disable=line-too-long
-parser.add_argument('--bcc',        type=str, help='BCC for send mails, comma seperated')                                                                       # pylint: disable=line-too-long
-parser.add_argument('--only-domains',   type=str, help='only handle these domains, comma seperated', default=','.join(default_only_domains))                    # pylint: disable=line-too-long
-parser.add_argument('--ignore-domains', type=str, help='ignore these domains, comma seperated',      default=','.join(default_ignore_domains))                  # pylint: disable=line-too-long
-parser.add_argument('--ignore-senders', type=str, help='ignore log entries from these senders, comma seperated',      default=','.join(default_ignore_senders)) # pylint: disable=line-too-long
+# pylint: disable=line-too-long
+parser.add_argument('--lmdb',       type=str, help="path to mta-lmdb.pl's lmdb database", default=DEFAULT_LMDB)
+parser.add_argument('--org-domain', type=str, help='organization domain in reports',      default=DEFAULT_ORG_DOMAIN)
+parser.add_argument('--org-name',   type=str, help='organization name in reports',        default=DEFAULT_ORG_DOMAIN)
+parser.add_argument('--contact',    type=str, help='contact info in reports',             default=DEFAULT_CONTACT)
+parser.add_argument('--date',       type=str, help='ISO date of report (def: yesterday)', default=str(yesterday))
+parser.add_argument('--bcc',        type=str, help='BCC for send mails, comma seperated')
+parser.add_argument('--only-domains',   type=str, help='only handle these domains, comma seperated', default=','.join(default_only_domains))
+parser.add_argument('--ignore-domains', type=str, help='ignore these domains, comma seperated',      default=','.join(default_ignore_domains))
+parser.add_argument('--ignore-senders', type=str, help='ignore log entries from these senders, comma seperated',      default=','.join(default_ignore_senders))
 parser.add_argument('--dry-run',    action='store_true', help='do not MAIL or POST reports')
 parser.add_argument('--no-mails',   action='store_true', help='do not MAIL reports')
 parser.add_argument('--no-posts',   action='store_true', help='do not POST reports')
 parser.add_argument('--verbose',    action='store_true', help='be verbose')
-parser.add_argument('logfiles',   type=str, help='exim log files', nargs='+')
+parser.add_argument('logfiles',   type=str, help='exim log files', nargs='*' if REDIS_AVAILABLE else '+')
+if REDIS_AVAILABLE:
+    parser.add_argument('--analyse-only',  action='store_true', help='only analyse the logs and store the results in redis')
+    parser.add_argument('--send-analysis', action='store_true', help='only send analysis results stored in redis (no logfiles required)')
+    parser.add_argument('--redis-servers', type=str, help='use these redis servers, sepereated by "/". If multiple given, first is rw, others ro')
+    parser.add_argument('--redis-auth',    type=str, help='password for redis servers')
+    parser.add_argument('--analysis-id',   type=str, help=f'id for storing, default: hostname ({DEFAULT_ANALYSIS_ID})', default=DEFAULT_ANALYSIS_ID)
+# pylint: enable=line-too-long
 args = parser.parse_args()
+if REDIS_AVAILABLE:
+    if args.analyse_only and args.send_analysis:
+        warn('You cannot specify both --analyse-only and --send-analysis')
+        parser.print_help()
+        sys.exit(1)
+    if not args.send_analysis and not args.logfiles:
+        warn('Please specify some logfiles to analyse')
+        parser.print_help()
+        sys.exit(1)
+    redis_servers = []
+    if args.redis_servers:
+        redis_servers = args.redis_servers.split('/')
+    if (args.analyse_only or args.send_analysis) and not redis_servers:
+        warn('Options --analyse-only and --send-analysis require --redis-servers')
+        parser.print_help()
+        sys.exit(1)
 if args.org_name == DEFAULT_ORG_DOMAIN and args.org_domain != args.org_name:
     args.org_name = args.org_domain
 only_domains   = args.only_domains.split(',')   if len(args.only_domains)   else []
@@ -526,7 +665,22 @@ startdate = datetime.date.fromisoformat(args.date)
 starttime = datetime.datetime.fromisoformat(startdate.isoformat())
 endtime   = starttime + datetime.timedelta(days=1) - datetime.timedelta(seconds=1)
 DEBUG_SEP = '='*200
+REDIS_LIFETIME = datetime.timedelta(days=2)
+REDIS_KEY_PREFIX = 'tlsrpt'
 
+if args.send_analysis:
+    stored_reports = redis_load_reports()
+    tlsrpts = {}
+    for stored_report in stored_reports.values():
+        tlsrpt = TLSRPT.from_json(stored_report)
+        old_tlsrpt = tlsrpts.get(tlsrpt.domain)
+        tlsrpts[tlsrpt.domain] = old_tlsrpt + tlsrpt \
+            if old_tlsrpt else \
+               tlsrpt
+    for tlsrpt in tlsrpts.values():
+        send_report(tlsrpt)
+    redis_remove_keys(stored_reports.keys())
+    sys.exit(0)
 
 # open LMDB database
 env = lmdb.open(args.lmdb, max_dbs=10)
@@ -558,7 +712,8 @@ def match_mx(host, mx_list):
     return False
 for logfile in args.logfiles:
     file_open = gzip.open if logfile.endswith('.gz') else io.open
-    with file_open(logfile, mode='rt', encoding='utf-8') as f:
+    # errors='replace' to allow parsing bad UTF-8 encodings
+    with file_open(logfile, mode='rt', encoding='utf-8', errors='replace') as f:
         for line in f.readlines():
             delivery_match = re.match(exim_delivery_re, line)
             # skip all lines, that are not delivery/defer messages
@@ -633,6 +788,9 @@ rua_emails = [
     if t.report and t.report.startswith('mailto:')
 ]
 
+# connect to redis RW server, but only if we only want to analyse
+redis_conn = redis_connect(write=True) if args.analyse_only else None
+
 # iterate over all domains
 for domain, tlsrpt in tlsrpt_data.items():
     if not tlsrpt.needs_report(
@@ -640,5 +798,11 @@ for domain, tlsrpt in tlsrpt_data.items():
             ignore_to=rua_emails,
     ):
         continue
+    if args.analyse_only:
+        redis_store_report(tlsrpt, redis_conn)
+        continue
     # send report otherwise
     send_report(tlsrpt)
+
+# disconnect from redis, if connected
+redis_close(redis_conn)
