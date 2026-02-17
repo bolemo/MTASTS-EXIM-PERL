@@ -52,8 +52,9 @@ class TLSLogEntry:
     '''
     stores one parsed mail log line for TLS report generation
     '''
-    line: str = None
+    line: str
     delivered: bool = True
+    policy_error: bool = False
     recipient: str = None
     sender: str = None
     mxhost: str = None
@@ -99,16 +100,17 @@ class TLSRPT:
     def _parse_logs(self, ignore_from, ignore_to):
         for entry in self._logs:
             if entry.sender in ignore_from:
-                #warn('Ignoring sender: %s' % logentry.sender)
+                debug(f'Ignoring sender: {entry.sender}')
                 continue
             if entry.recipient in ignore_to:
-                #warn('Ignoring recipient: %s' % logentry.recipient)
+                debug(f'Ignoring recipient: {entry.recipient}')
                 continue
-            #warn('line: %s' % logentry.line)
+            #debug(f'line: {entry.line}')
             if entry.delivered:
                 self._deliveries += 1
-                continue
-            self._errors.append(entry.line)
+            if not entry.delivered or entry.policy_error:
+                # adding add line to errors if delivery was not successful or policy error detected
+                self._errors.append(entry.line)
         if self._errors:
             # now is a good time to analyse the error logs and store the result in 'failure_details'
             self._failure_details = parse_exim_errors(self._errors)
@@ -325,6 +327,17 @@ def utc2localtz(dt): # pylint: disable=invalid-name
 
 def exim_error2tlsrpt_error(error):
     # pylint: disable=missing-function-docstring
+    ignored = [
+        'SMTP timeout ',
+        'SMTP error from remote mail server ',
+        'Connection timed out',
+        'Remote host closed connection in response to initial connection',
+    ]
+    for ign in ignored:
+        if error.startswith(ign):
+            debug(f'ignored: {error}')
+            return None, None
+
     errors = {
         # pylint: disable=line-too-long
         # https://easydmarc.com/blog/de/simple-mail-transfer-protocol-smtp-tls-berichterstattung/
@@ -334,53 +347,62 @@ def exim_error2tlsrpt_error(error):
         'TLS session: (certificate verification failed): certificate invalid': 'validation-failure',
         'TLS session: (certificate verification failed): Verification failed. The certificate differs.': 'validation-failure',
     }
-    if error in errors:
-        return errors[error]
-    ignored = [
-        'SMTP timeout ',
-        'SMTP error from remote mail server ',
-        'Connection timed out',
-    ]
-    for ign in ignored:
-        if error.startswith(ign):
-            return None
+    result_type = errors.get(error)
+    if not result_type and ' must not be used to deliver to domain ' in error:
+        result_type = 'validation-failure'
+    if result_type:
+        return result_type, error
+
     warn(f'Unknown error string "{error}"!')
-    return 'validation-failure'
+    return 'validation-failure', 'unknown failure'
 
 def parse_exim_errors(lines):
-    # pylint: disable=missing-function-docstring
+    # pylint: disable=missing-function-docstring disable=too-many-locals
     errors = defaultdict(int)
     # pylint: disable=line-too-long
     # 2023-03-10 17:58:55 1paeYC-001MTh-0L == measurement@mail-mtasts-rn-plain.measurement.email-security-scans.org R=dnslookup T=remote_smtp_mtasts_enforce defer (-38) H=plaintext.measurement.email-security-scans.org [2a06:d1c0:dead:3::83] I=[2a06:d1c0:dead:2::182] DT=0s: a TLS session is required, but the server did not offer TLS support
     # 2026-02-02 04:49:32 1vmkcr-00000003gVc-3F74 == dmarc-rpt@domeneshop.no R=dnslookup T=remote_smtp defer (110): Connection timed out H=mx.domeneshop.no [194.63.252.21] I=[139.19.205.225] DT=2m15s
+    # 2026-02-16 03:20:47 1vroCe-0000000EHVq-3NEg => 2fincamt@tls.au.dmarcian.com P=<smtp-tls-reports@mpi-klsb.mpg.de> R=dnslookup T=remote_smtp S=2991 H=tls.au.dmarcian.com [34.116.117.45] I=[139.19.205.192] X=TLS1.3:ECDHE_SECP256R1__RSA_PSS_RSAE_SHA256__AES_256_GCM:256 CV=yes DN="CN=au-app.au.dmarcian.com" C="250 2.0.0 Ok: queued as 3EB0D28D9E4" QT=1m35s DT=6s Policy-Error: Host "tls.au.dmarcian.com" must not be used to deliver to domain "tls.au.dmarcian.com" according to policy "sts"
     error_re = r'^.+ == (?P<email>\S+) (.+ H=(?P<mxhost>\S+) \[(?P<mxip>\S+)\] I=\[(?P<lip>\S+)\].*?: (?P<error>.+)|.+: (?P<error_alt>.+) H=(?P<mxhost_alt>\S+) \[(?P<mxip_alt>\S+)\] I=\[(?P<lip_alt>\S+)\] .+)$'
+    policy_error_re = r'.+ [=-]> (?P<email>\S+) .+ H=(?P<mxhost>\S+) \[(?P<mxip>\S+)\] I=\[(?P<lip>\S+)\].* Policy-Error: (?P<error>.+)$'
     # pylint: enable=line-too-long
     for curline in lines:
         error_match = re.match(error_re, curline)
-        if not error_match:
+        if error_match:
+            alt = '' if error_match.group('error') else '_alt'
+            f_mxhost = error_match.group('mxhost'+alt)
+            f_mxip   = error_match.group('mxip'+alt)
+            f_lip    = error_match.group('lip'+alt)
+            f_error  = error_match.group('error'+alt)
+        policy_error_match = re.match(policy_error_re, curline)
+        if not error_match and policy_error_match:
+            f_mxhost = policy_error_match.group('mxhost')
+            f_mxip   = policy_error_match.group('mxip')
+            f_lip    = policy_error_match.group('lip')
+            f_error  = policy_error_match.group('error')
+        if not error_match and not policy_error_match:
             warn(f'Failed to match error line against "{error_re}":\n{curline}')
             continue
-        alt = '' if error_match.group('error') else '_alt'
-        #f_email  = error_match.group('email'+alt)
-        f_mxhost = error_match.group('mxhost'+alt)
-        f_mxip   = error_match.group('mxip'+alt)
-        f_lip    = error_match.group('lip'+alt)
-        f_error  = error_match.group('error'+alt)
-        result_type = exim_error2tlsrpt_error(f_error)
+        result_type, reason = exim_error2tlsrpt_error(f_error)
         if result_type is None:
             continue
-        error_key = (result_type, f_lip, f_mxip, f_mxhost)
+        error_key = (result_type, f_lip, f_mxip, f_mxhost, reason)
         errors[error_key] += 1
-    return [
-        {
-            "result-type":           key[0],
-            "sending-mta-ip":        key[1],
-            "receiving-ip":          key[2],
-            "receiving-mx-hostname": key[3],
+        continue
+    result = []
+    for error_key, count in errors.items():
+        result_type, sender_ip, receiver, mx, reason = error_key
+        res = {
+            "result-type":           result_type,
+            "sending-mta-ip":        sender_ip,
+            "receiving-ip":          receiver,
+            "receiving-mx-hostname": mx,
             "failed-session-count":  int(count),
         }
-        for key, count in errors.items()
-    ]
+        if reason:
+            res['failure-reason-code'] = reason
+        result.append(res)
+    return result
 
 def send_mail(rua_addresses, report, fake=False):
     # pylint: disable=missing-function-docstring
@@ -764,21 +786,34 @@ for logfile in args.logfiles:
             if rua == '':
                 warn(f'Ignoring domain {domain} without rua set to "": {line}')
                 continue
+            # check if mx hostnames do no match this delivery line,
+            # but only for successful deliveries
+            policy_error = False # pylint: disable=invalid-name
+            if tlsrpt_data[domain].policy_type in ['sts', 'tlsa'] and \
+               not match_mx(mxhost, tlsrpt_data[domain].mx) and \
+               delivered:
+                debug(
+                    f'Warning: Host "{mxhost}" must not be used to deliver to domain "{domain}" '
+                    f' according to policy: {tlsrpt_data[domain].policy_type}'
+                    f' mxhosts={tlsrpt_data[domain].mx}'
+                    f' line: {line}'
+                )
+                line += (
+                    f' Policy-Error: Host {mxhost} must not be used to deliver'
+                    f' to domain {domain}'
+                    f' according to policy {tlsrpt_data[domain].policy_type}'
+                    f' see https://datatracker.ietf.org/doc/html/rfc8461#section-5'
+                )
+                # pylint: disable=invalid-name
+                policy_error = True
             tlsrpt_data[domain].add_logentry(TLSLogEntry(
                 line = line,
                 delivered = delivered,
+                policy_error = policy_error,
                 recipient = recipient,
                 sender = sender,
                 mxhost = mxhost,
             ))
-            # check if mx hostnames do no match this delivery line
-            if tlsrpt_data[domain].policy_type in ['sts', 'tlsa'] and \
-               not match_mx(mxhost, tlsrpt_data[domain].mx):
-                warn(
-                    f'Warning: Host "{mxhost}" must not be used to deliver to domain "{domain}" '
-                    f'according to policy: {tlsrpt_data[domain].policy_type}'
-                    f'mxhosts={tlsrpt_data[domain].mx}'
-                )
 
 
 # extract all rua email addresses
