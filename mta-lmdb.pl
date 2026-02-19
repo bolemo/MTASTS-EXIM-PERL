@@ -10,9 +10,11 @@ use Mail::STS;
 
 
 # settings
-our $MTASTS_DEBUG;
-our $MTASTS_LMDB_PATH;
-
+our $MTASTS_DEBUG;     # set to 1 to enable debugging output
+our $MTASTS_LMDB_PATH; # set to path where to store LMDB database, e.g. '<path-to-exim-spooldir>/lmdb2'
+if (!defined($MTASTS_LMDB_PATH)) {
+    $MTASTS_LMDB_PATH = '/var/spool/exim4/lmdb2';
+}
 
 # internal functions, declared here, defined below
 sub _mtasts_debug($);
