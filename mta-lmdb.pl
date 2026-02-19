@@ -126,7 +126,7 @@ sub mtasts_valid_mx($$) {
             return '';
         }
     }
-    _mtasts_debug('mtasts_valid_mx('.$domain.', '.$host.'): returning 0: host "'.$host.'" NOT in MX list: ["'.join('", "', @mx).'"]');
+    _mtasts_debug('mtasts_valid_mx('.$domain.', '.$host.'): returning "do_not_connect:no_match": host "'.$host.'" NOT in MX list: ["'.join('", "', @mx).'"]');
     return 'do_not_connect:no_match';
 }
 
