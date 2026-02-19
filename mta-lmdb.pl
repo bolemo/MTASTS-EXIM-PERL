@@ -177,7 +177,7 @@ sub getmx($) {
 sub _mtasts_debug($) {
     my ($msg) = @_;
 
-    if (defined($MTASTS_DEBUG) && ($MTASTS_DEBUG eq 0)) {
+    if (!defined($MTASTS_DEBUG) || ($MTASTS_DEBUG eq 0)) {
         return;
     }
     # XXX:fixme: assume running in exim if stdout is not a tty
