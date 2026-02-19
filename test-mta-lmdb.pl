@@ -2,7 +2,7 @@
 
 use strict;
 
-our $MTASTS_DEBUG = 1;
+#our $MTASTS_DEBUG = 1;
 our $MTASTS_LMDB_PATH = '/tmp/lmdb';
 
 do "./mta-lmdb.pl";
