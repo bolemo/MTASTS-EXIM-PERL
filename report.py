@@ -586,7 +586,7 @@ def redis_close(conn):
 def redis_store_report(rpt, conn):
     # pylint: disable=missing-function-docstring
     date = datetime.date.fromisoformat(args.date).isoformat()
-    redis_key = f'{REDIS_KEY_PREFIX}:{rpt.domain}:{args.analysis_id}:{date}'
+    redis_key = f'{REDIS_KEY_PREFIX}:{rpt.domain}:{analysis_id}:{date}'
     if args.dry_run:
         print(f'conn.set({redis_key}, {rpt.to_json()}, ex={REDIS_LIFETIME})')
         return
@@ -662,22 +662,24 @@ if REDIS_AVAILABLE:
     parser.add_argument('--analysis-id',   type=str, help=f'id for storing, default: hostname ({DEFAULT_ANALYSIS_ID})', default=DEFAULT_ANALYSIS_ID)
 # pylint: enable=line-too-long
 args = parser.parse_args()
-if REDIS_AVAILABLE:
-    if args.analyse_only and args.send_analysis:
-        warn('You cannot specify both --analyse-only and --send-analysis')
-        parser.print_help()
-        sys.exit(1)
-    if not args.send_analysis and not args.logfiles:
-        warn('Please specify some logfiles to analyse')
-        parser.print_help()
-        sys.exit(1)
-    redis_servers = []
-    if args.redis_servers:
-        redis_servers = args.redis_servers.split('/')
-    if (args.analyse_only or args.send_analysis) and not redis_servers:
-        warn('Options --analyse-only and --send-analysis require --redis-servers')
-        parser.print_help()
-        sys.exit(1)
+redis_servers = []
+if REDIS_AVAILABLE and args.redis_servers:
+    redis_servers = args.redis_servers.split('/')
+analyse_only  = args.analyse_only  if REDIS_AVAILABLE else False
+send_analysis = args.send_analysis if REDIS_AVAILABLE else False
+analysis_id   = args.analysis_id   if REDIS_AVAILABLE else None
+if analyse_only and send_analysis:
+    warn('You cannot specify both --analyse-only and --send-analysis')
+    parser.print_help()
+    sys.exit(1)
+if not send_analysis and not args.logfiles:
+    warn('Please specify some logfiles to analyse')
+    parser.print_help()
+    sys.exit(1)
+if (analyse_only or send_analysis) and not redis_servers:
+    warn('Options --analyse-only and --send-analysis require --redis-servers')
+    parser.print_help()
+    sys.exit(1)
 if args.org_name == DEFAULT_ORG_DOMAIN and args.org_domain != args.org_name:
     args.org_name = args.org_domain
 only_domains   = args.only_domains.split(',')   if len(args.only_domains)   else []
@@ -690,7 +692,7 @@ DEBUG_SEP = '='*200
 REDIS_LIFETIME = datetime.timedelta(days=2)
 REDIS_KEY_PREFIX = 'tlsrpt'
 
-if args.send_analysis:
+if send_analysis:
     stored_reports = redis_load_reports()
     tlsrpts = {}
     for stored_report in stored_reports.values():
@@ -824,7 +826,7 @@ rua_emails = [
 ]
 
 # connect to redis RW server, but only if we only want to analyse
-redis_conn = redis_connect(write=True) if args.analyse_only else None
+redis_conn = redis_connect(write=True) if analyse_only else None
 
 # iterate over all domains
 for domain, tlsrpt in tlsrpt_data.items():
@@ -833,7 +835,7 @@ for domain, tlsrpt in tlsrpt_data.items():
             ignore_to=rua_emails,
     ):
         continue
-    if args.analyse_only:
+    if analyse_only:
         redis_store_report(tlsrpt, redis_conn)
         continue
     # send report otherwise
