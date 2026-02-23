@@ -21,8 +21,9 @@ sub _mtasts_debug($);
 sub _mtasts_warning($);
 sub _mtasts_sts_query($);
 sub _mtasts_sts_load_policy($);
+sub _mtasts_db_env();
 sub _mtasts_db_query($$);
-sub _mtasts_db_save($$$$);
+sub _mtasts_db_save($$$);
 
 
 # main API functions
@@ -91,7 +92,7 @@ sub mtasts_policy($) {
     };
 
     # and save in DB
-    _mtasts_db_save($DB, $domain, $STS, $now);
+    _mtasts_db_save($domain, $STS, $now);
 
     # Loaded the DB with a proper policy.  Send the current mode and have a nice day.
     _mtasts_debug('mtasts_policy('.$domain.'): returning "'.$STS->{mode}.'" (after updating DB)');
@@ -254,11 +255,21 @@ sub _mtasts_sts_load_policy($) {
     return $STS;
 }
 
-sub _mtasts_lmdb_init() {
+# Global LMDB env, initialized once and reused across calls to avoid
+# re-opening the environment on every query (which causes "Invalid argument"
+# errors when multiple Exim workers or external processes access the DB
+# concurrently). Read-only and read-write transactions are opened separately
+# so that concurrent readers (Exim workers, report.py) never conflict.
+our $_mtasts_lmdb_env;
+
+sub _mtasts_db_env() {
+    return $_mtasts_lmdb_env if defined($_mtasts_lmdb_env);
+
     # load LMDB_File instead of globally in case not needed
     # to avoid errors if not installed
     use LMDB_File qw(:flags :cursor_op);
     use File::Path qw(make_path);
+
     my $path = $MTASTS_LMDB_PATH;
 
     # create the path hirachy, handle any error
@@ -268,9 +279,9 @@ sub _mtasts_lmdb_init() {
         for my $diag (@$err) {
             my ($file, $message) = %$diag;
             if ($file eq '') {
-                _mtasts_warning('_mtasts_lmdb_init(): general error: '.$message);
+                _mtasts_warning('_mtasts_db_env(): general error: '.$message);
             } else {
-                _mtasts_warning('_mtasts_lmdb_init(): problem unlinking '.$file.': '.$message);
+                _mtasts_warning('_mtasts_db_env(): problem unlinking '.$file.': '.$message);
             }
         }
         return undef;
@@ -280,29 +291,40 @@ sub _mtasts_lmdb_init() {
     eval {
         $env = LMDB::Env->new($path, { mapsize => 100 * 1024 * 1024 * 1024 });
     } or do {
-        _mtasts_warning('_mtasts_lmdb_init(): could not create LMDB env: '.$LMDB_file::last_err);
+        _mtasts_warning('_mtasts_db_env(): could not create LMDB env: '.$LMDB_File::last_err);
         return undef;
     };
 
-    my $transaction = $env->BeginTxn();
-    if (! defined($transaction)) {
-        _mtasts_warning('_mtasts_lmdb_init(): could not get LMDB transaction: '.$LMDB_file::last_err);
+    # open the named DB once with a rw transaction so MDB_CREATE takes effect
+    my $txn = $env->BeginTxn();
+    if (! defined($txn)) {
+        _mtasts_warning('_mtasts_db_env(): could not begin init transaction: '.$LMDB_File::last_err);
         return undef;
     }
+    $txn->OpenDB({ flags => MDB_CREATE });
+    $txn->commit();
 
-    return $transaction->OpenDB({ flags => MDB_CREATE });
+    $_mtasts_lmdb_env = $env;
+    return $env;
 }
 
 sub _mtasts_db_query($$) {
     my ($domain, $now) = @_;
 
     my %DB;
-    my $db = _mtasts_lmdb_init();
-    if (! defined($db)) {
-        _mtasts_warning('_mtasts_db_query(): _mtasts_lmdb_init() failed');
+    my $env = _mtasts_db_env();
+    if (! defined($env)) {
+        _mtasts_warning('_mtasts_db_query(): _mtasts_db_env() failed');
         return undef;
     }
-    $DB{db} = $db;
+
+    # use a read-only transaction: multiple concurrent readers are safe
+    my $txn = $env->BeginTxn(MDB_RDONLY);
+    if (! defined($txn)) {
+        _mtasts_warning('_mtasts_db_query(): could not begin read-only transaction: '.$LMDB_File::last_err);
+        return undef;
+    }
+    my $db = $txn->OpenDB();
 
     $DB{valid} = 0;
     eval {
@@ -322,21 +344,36 @@ sub _mtasts_db_query($$) {
     } or do {
         $DB{valid} = 0;
     };
+    $txn->abort();
 
     return \%DB;
 }
 
-sub _mtasts_db_save($$$$) {
-    my ($DB, $domain, $STS, $now) = @_;
+sub _mtasts_db_save($$$) {
+    my ($domain, $STS, $now) = @_;
 
-    $DB->{db}->put($domain.':expire', $STS->{max_age}+$now,  MDB_NODUPDATA);
-    $DB->{db}->put($domain.':id',     $STS->{id},            MDB_NODUPDATA);
-    $DB->{db}->put($domain.':mode',   $STS->{mode},          MDB_NODUPDATA);
-    $DB->{db}->put($domain.':report', $STS->{rua},           MDB_NODUPDATA);
-    $DB->{db}->put($domain.':policy', $STS->{policy},        MDB_NODUPDATA);
+    my $env = _mtasts_db_env();
+    if (! defined($env)) {
+        _mtasts_warning('_mtasts_db_save(): _mtasts_db_env() failed');
+        return;
+    }
+
+    # use a read-write transaction for writes
+    my $txn = $env->BeginTxn();
+    if (! defined($txn)) {
+        _mtasts_warning('_mtasts_db_save(): could not begin read-write transaction: '.$LMDB_File::last_err);
+        return;
+    }
+    my $db = $txn->OpenDB();
+
+    $db->put($domain.':expire', $STS->{max_age}+$now,  MDB_NODUPDATA);
+    $db->put($domain.':id',     $STS->{id},            MDB_NODUPDATA);
+    $db->put($domain.':mode',   $STS->{mode},          MDB_NODUPDATA);
+    $db->put($domain.':report', $STS->{rua},           MDB_NODUPDATA);
+    $db->put($domain.':policy', $STS->{policy},        MDB_NODUPDATA);
     # LMDB only stores strings, join MX array by ':'
     my $mx = join(':', @{$STS->{mx}});
-    $DB->{db}->put($domain.':mx', $mx, MDB_NODUPDATA);
+    $db->put($domain.':mx', $mx, MDB_NODUPDATA);
 
-    $DB->{db}->Txn->commit;
+    $txn->commit();
 }
