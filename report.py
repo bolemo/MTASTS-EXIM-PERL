@@ -707,7 +707,7 @@ if send_analysis:
     sys.exit(0)
 
 # open LMDB database
-env = lmdb.open(args.lmdb, max_dbs=10)
+env = lmdb.open(args.lmdb, max_dbs=10, readonly=True)
 db = env.open_db()
 # iterate over all entries
 with env.begin() as txn:
