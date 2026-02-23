@@ -304,7 +304,7 @@ def localtz2utc(dt): # pylint: disable=invalid-name
     # it is impossible to determine if the time is determine if the
     # given time is BEFORE or AFTER the change, e.g.
     # 2023-03-26 02:59:00 can be CET and CEST
-    offset = dt - datetime.datetime.utcfromtimestamp(localts)
+    offset = dt - datetime.datetime.fromtimestamp(localts, datetime.UTC).replace(tzinfo=None)
     # return datetime object adjusted by computed offset
     return dt - offset
 def utc2localtz(dt): # pylint: disable=invalid-name
@@ -321,7 +321,7 @@ def utc2localtz(dt): # pylint: disable=invalid-name
     # it is impossible to determine if the time is determine if the
     # given time is BEFORE or AFTER the change, e.g.
     # 2023-03-26 02:59:00 can be CET and CEST
-    offset = dt - datetime.datetime.utcfromtimestamp(localts)
+    offset = dt - datetime.datetime.fromtimestamp(localts, datetime.UTC).replace(tzinfo=None)
     # return datetime object adjusted by computed offset
     return dt + offset
 
