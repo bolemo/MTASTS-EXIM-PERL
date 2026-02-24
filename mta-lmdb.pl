@@ -289,7 +289,7 @@ sub _mtasts_db_env() {
 
     my $env;
     eval {
-        $env = LMDB::Env->new($path, { mapsize => 100 * 1024 * 1024 * 1024 });
+        $env = LMDB::Env->new($path, { mapsize => 100 * 1024 * 1024 * 1024, maxreaders => 256 });
     } or do {
         _mtasts_warning('_mtasts_db_env(): could not create LMDB env: '.$LMDB_File::last_err);
         return undef;
@@ -344,7 +344,7 @@ sub _mtasts_db_query($$) {
     } or do {
         $DB{valid} = 0;
     };
-    $txn->abort();
+    eval { $txn->abort() };
 
     return \%DB;
 }
