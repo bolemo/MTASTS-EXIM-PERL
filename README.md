@@ -87,10 +87,7 @@ Exim has a an experimental LMDB lookup.  This may reduce the need of the getmx s
 
 ### Exim Configs:
 ```
-  perl_startup = \
-      our $MTASTS_DEBUG = 1; \
-      our $MTASTS_LMDB_PATH = '<path-to-exim-spooldir>/lmdb2'; \
-      do '<path-to-script>/mta-lmdb.pl';
+  perl_startup = do '<path-to-script>/mtasts-startup.pl'
   perl_at_start = true
 ```
 
@@ -100,8 +97,8 @@ Exim has a an experimental LMDB lookup.  This may reduce the need of the getmx s
 dnslookup_mtasts_enforce:
   debug_print = "R: dnslookup-mtasts-enforce for $local_part@$domain"
   driver = dnslookup
-# This condition uses the getmta subroutine and returns the MTA-STS policy.  If the policy is enforce continue with this router.
-  condition = ${if eq{${perl{getmta}{$domain}}}{enforce}}
+# This condition uses the mtasts_policy subroutine and returns the MTA-STS policy.  If the policy is enforce continue with this router.
+  condition = ${if eq{${perl{mtasts_policy}{$domain}}}{enforce}}
   domains = ! +local_domains
 # Push the mail to the remote_smtp_mtasts_enforce transport
   transport = remote_smtp_mtasts_enforce
@@ -117,8 +114,8 @@ dnslookup_mtasts_enforce:
 dnslookup_mtasts_testing:
   debug_print = "R: dnslookup-mtasts-testing for $local_part@$domain"
   driver = dnslookup
-# This condition uses the getmta subroutine and returns the MTA-STS policy.  If the policy is testing continue with this router.
-  condition = ${if eq{${perl{getmta}{$domain}}}{testing}}
+# This condition uses the mtasts_policy subroutine and returns the MTA-STS policy.  If the policy is testing continue with this router.
+  condition = ${if eq{${perl{mtasts_policy}{$domain}}}{testing}}
   domains = ! +local_domains
 # Push the email to the remote_smtp_mtasts_testing transport
   transport = remote_smtp_mtasts_testing
@@ -134,8 +131,8 @@ dnslookup_mtasts_testing:
 redirect_mtasts_fail:
   debug_print = "R: redirect-mtasts-failure for $local_part@$domain $address_data"
   driver = redirect
-# This condition uses the getmta subroutine and returns the MTA-STS policy.  If the policy is fail continue with this router.
-  condition = ${if eq{${perl{getmta}{$domain}}}{fail}}
+# This condition uses the mtasts_policy subroutine and returns the MTA-STS policy.  If the policy is fail continue with this router.
+  condition = ${if eq{${perl{mtasts_policy}{$domain}}}{fail}}
   domains = ! +local_domains
 # Per RFC 8461 defer for another attempt later.  Hopefully the receiving agency will fix their MTA-STS.
   allow_defer
@@ -149,10 +146,10 @@ remote_smtp_mtasts_enforce:
   debug_print = "T: remote_smtp_mtasts_enforce for $local_part@$domain"
   driver = smtp
 # Do a full cert check on the MTA-STS mx host names
-  tls_verify_cert_hostnames = {${perl{getmx}{$domain}}}
+  tls_verify_cert_hostnames = {${perl{mtasts_mx_hostlist}{$domain}}}
   tls_tempfail_tryclear = false
 # Do not connect to any servers that are not listed in the MTA-STS mx.
-  event_action = ${if eq {tcp:connect}{$event_name}{${perl{getmta}{$domain}{$host}}} {}}
+  event_action = ${if eq {tcp:connect}{$event_name}{${perl{mtasts_valid_mx}{$domain}{$host}}} {}}
 .ifndef IGNORE_SMTP_LINE_LENGTH_LIMIT
   message_size_limit = ${if > {$max_received_linelength}{998} {1}{0}}
 .endif
