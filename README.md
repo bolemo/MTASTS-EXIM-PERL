@@ -1,10 +1,13 @@
 # MTASTS-EXIM-PERL
 
 This is a forked version from
+https://gitlab.mpi-klsb.mpg.de/pcernko/MTASTS-EXIM-PERL
+
+That is itself a forked version from
 https://github.com/Bobberty/MTASTS-EXIM-PERL which seems orphaned (no
 commits since 2019, open issue since 2023-03-01).
 
-In addition to the perl script for Exim, this repository also provides
+That also provides, in addition to the perl script for Exim, 
 a report generator for TLSRPT report according to RFC 8460, [see
 below](#report-generator).
 
