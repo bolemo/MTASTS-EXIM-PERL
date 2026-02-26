@@ -1,0 +1,8 @@
+# Copy this file to mtasts-startup.pl and adapt to your setup.
+# Then reference it in your Exim configuration:
+#   perl_startup = do '/path/to/mtasts-startup.pl'
+#   perl_at_start = true
+
+our $MTASTS_LMDB_PATH = '/var/spool/exim4/mtasts';  # path to LMDB database
+our $MTASTS_DEBUG = 0;                              # set to 1 to enable debug logging
+do '/opt/MTASTS-EXIM-PERL/mta-lmdb.pl';             # path to mta-lmdb.pl
