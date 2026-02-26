@@ -463,6 +463,10 @@ def send_mail(rua_addresses, report, fake=False):
             DEBUG_SEP
         ]))
         return
+
+    if len(smtp_to) == 0:
+        return
+
     with smtplib.SMTP(host='localhost') as smtp:
         failed_recipients = smtp.sendmail(smtp_from, smtp_to, msg.as_string())
         if len(failed_recipients) > 0:
