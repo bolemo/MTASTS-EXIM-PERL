@@ -21,7 +21,8 @@ sub _mtasts_debug($);
 sub _mtasts_warning($);
 sub _mtasts_sts_query($);
 sub _mtasts_sts_load_policy($);
-sub _mtasts_db_env();
+sub _mtasts_db_init();
+sub _mtasts_db_open($);
 sub _mtasts_db_query($$);
 sub _mtasts_db_save($$$);
 
@@ -255,56 +256,64 @@ sub _mtasts_sts_load_policy($) {
     return $STS;
 }
 
-# Global LMDB env, initialized once and reused across calls to avoid
-# re-opening the environment on every query (which causes "Invalid argument"
-# errors when multiple Exim workers or external processes access the DB
-# concurrently). Read-only and read-write transactions are opened separately
-# so that concurrent readers (Exim workers, report.py) never conflict.
-our $_mtasts_lmdb_env;
-
-sub _mtasts_db_env() {
-    return $_mtasts_lmdb_env if defined($_mtasts_lmdb_env);
-
-    # load LMDB_File instead of globally in case not needed
-    # to avoid errors if not installed
-    use LMDB_File qw(:flags :cursor_op);
+# Ensure the LMDB directory exists and the database has been created.
+# Must be called with a write lock held (i.e. from _mtasts_db_save).
+# Safe to call even if the directory/db already exist.
+sub _mtasts_db_init() {
     use File::Path qw(make_path);
 
     my $path = $MTASTS_LMDB_PATH;
 
-    # create the path hirachy, handle any error
     make_path($path, { error => \my $err });
-    # error handling as described in LMDB_File documentation
     if ($err && @$err) {
         for my $diag (@$err) {
             my ($file, $message) = %$diag;
             if ($file eq '') {
-                _mtasts_warning('_mtasts_db_env(): general error: '.$message);
+                _mtasts_warning('_mtasts_db_init(): general error: '.$message);
             } else {
-                _mtasts_warning('_mtasts_db_env(): problem unlinking '.$file.': '.$message);
+                _mtasts_warning('_mtasts_db_init(): problem unlinking '.$file.': '.$message);
             }
         }
-        return undef;
+        return 0;
     }
+    return 1;
+}
+
+# Open a fresh LMDB env with MDB_NOLOCK.
+# Each call returns a new env object; caller must ensure it goes out of scope
+# (or is explicitly undef'd) to close it promptly.
+# For write access, pass a true value as argument; caller must hold the
+# flock on the write lockfile before calling this function.
+sub _mtasts_db_open($) {
+    my ($write) = @_;
+
+    use LMDB_File qw(:flags :cursor_op);
+
+    my $path = $MTASTS_LMDB_PATH;
+    my $flags = MDB_NOLOCK;
 
     my $env;
     eval {
-        $env = LMDB::Env->new($path, { mapsize => 100 * 1024 * 1024 * 1024, maxreaders => 256 });
+        $env = LMDB::Env->new($path, {
+            mapsize => 100 * 1024 * 1024 * 1024,
+            flags   => $flags,
+        });
     } or do {
-        _mtasts_warning('_mtasts_db_env(): could not create LMDB env: '.$LMDB_File::last_err);
+        _mtasts_warning('_mtasts_db_open(): could not create LMDB env: '.$LMDB_File::last_err);
         return undef;
     };
 
-    # open the named DB once with a rw transaction so MDB_CREATE takes effect
-    my $txn = $env->BeginTxn();
-    if (! defined($txn)) {
-        _mtasts_warning('_mtasts_db_env(): could not begin init transaction: '.$LMDB_File::last_err);
-        return undef;
+    if ($write) {
+        # ensure the named DB exists (MDB_CREATE only valid in a rw txn)
+        my $txn = $env->BeginTxn();
+        if (! defined($txn)) {
+            _mtasts_warning('_mtasts_db_open(): could not begin init transaction: '.$LMDB_File::last_err);
+            return undef;
+        }
+        $txn->OpenDB({ flags => MDB_CREATE });
+        $txn->commit();
     }
-    $txn->OpenDB({ flags => MDB_CREATE });
-    $txn->commit();
 
-    $_mtasts_lmdb_env = $env;
     return $env;
 }
 
@@ -312,13 +321,14 @@ sub _mtasts_db_query($$) {
     my ($domain, $now) = @_;
 
     my %DB;
-    my $env = _mtasts_db_env();
+
+    # open a fresh env for this read; no lock needed (MDB_NOLOCK + ro txn)
+    my $env = _mtasts_db_open(0);
     if (! defined($env)) {
-        _mtasts_warning('_mtasts_db_query(): _mtasts_db_env() failed');
+        _mtasts_warning('_mtasts_db_query(): _mtasts_db_open() failed');
         return undef;
     }
 
-    # use a read-only transaction: multiple concurrent readers are safe
     my $txn = $env->BeginTxn(MDB_RDONLY);
     if (! defined($txn)) {
         _mtasts_warning('_mtasts_db_query(): could not begin read-only transaction: '.$LMDB_File::last_err);
@@ -345,6 +355,7 @@ sub _mtasts_db_query($$) {
         $DB{valid} = 0;
     };
     eval { $txn->abort() };
+    # $env goes out of scope here, closing the environment
 
     return \%DB;
 }
@@ -352,9 +363,34 @@ sub _mtasts_db_query($$) {
 sub _mtasts_db_save($$$) {
     my ($domain, $STS, $now) = @_;
 
-    my $env = _mtasts_db_env();
+    use Fcntl qw(:flock);
+
+    my $lockfile = $MTASTS_LMDB_PATH.'/write.lock';
+
+    # acquire exclusive write lock; this is fork-safe and process-safe
+    open(my $lockfh, '>', $lockfile) or do {
+        _mtasts_warning('_mtasts_db_save(): could not open lock file '.$lockfile.': '.$!);
+        return;
+    };
+    flock($lockfh, LOCK_EX) or do {
+        _mtasts_warning('_mtasts_db_save(): could not acquire write lock: '.$!);
+        close($lockfh);
+        return;
+    };
+
+    # ensure directory and DB exist (safe to call even if already initialised)
+    if (! _mtasts_db_init()) {
+        _mtasts_warning('_mtasts_db_save(): _mtasts_db_init() failed');
+        flock($lockfh, LOCK_UN);
+        close($lockfh);
+        return;
+    }
+
+    my $env = _mtasts_db_open(1);
     if (! defined($env)) {
-        _mtasts_warning('_mtasts_db_save(): _mtasts_db_env() failed');
+        _mtasts_warning('_mtasts_db_save(): _mtasts_db_open() failed');
+        flock($lockfh, LOCK_UN);
+        close($lockfh);
         return;
     }
 
@@ -362,6 +398,8 @@ sub _mtasts_db_save($$$) {
     my $txn = $env->BeginTxn();
     if (! defined($txn)) {
         _mtasts_warning('_mtasts_db_save(): could not begin read-write transaction: '.$LMDB_File::last_err);
+        flock($lockfh, LOCK_UN);
+        close($lockfh);
         return;
     }
     my $db = $txn->OpenDB();
@@ -376,4 +414,8 @@ sub _mtasts_db_save($$$) {
     $db->put($domain.':mx', $mx, MDB_NODUPDATA);
 
     $txn->commit();
+    # $env goes out of scope here, closing the environment
+
+    flock($lockfh, LOCK_UN);
+    close($lockfh);
 }
