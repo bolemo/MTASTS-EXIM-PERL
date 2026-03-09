@@ -391,12 +391,12 @@ def parse_exim_errors(lines):
         continue
     result = []
     for error_key, count in errors.items():
-        result_type, sender_ip, receiver, mx, reason = error_key
+        result_type, sender_ip, receiver, receiving_mx, reason = error_key
         res = {
             "result-type":           result_type,
             "sending-mta-ip":        sender_ip,
             "receiving-ip":          receiver,
-            "receiving-mx-hostname": mx,
+            "receiving-mx-hostname": receiving_mx,
             "failed-session-count":  int(count),
         }
         if reason:
@@ -495,16 +495,30 @@ def post_report(rua_addresses, report):
     report_json = json.dumps(report)
     report_gz = gzip.compress(report_json.encode())
     for rua_address in rua_addresses:
+        report_headers = dict(headers)
+        report_data = report_gz
+        if 'proton.me' in rua_address:
+            warn(
+                'Sending uncompressed data to proton.me '
+                'until they make the endpoint RFC-compliant.'
+            )
+            report_headers['Content-Type'] = 'application/json'
+            report_data = report_json
         if args.dry_run:
             print('\n'.join([
                 DEBUG_SEP,
-                f'POST {rua_address} headers={headers}\n{json.dumps(report, indent=4)}\n',
+                f'POST {rua_address} headers={report_headers}\n{json.dumps(report, indent=4)}\n',
                 DEBUG_SEP
             ]))
             continue
         send_mail([f"POST@{re.sub('[/?&]', '.', rua_address[8:])}"], report, fake=True)
         try:
-            response = requests.post(rua_address, data=report_gz, headers=headers, timeout=60)
+            response = requests.post(
+                rua_address,
+                data=report_data,
+                headers=report_headers,
+                timeout=60
+            )
         except requests.exceptions.ConnectionError as connerr:
             warn(f'POST to "{rua_address}" failed with ConnectionError: {connerr}')
             continue
