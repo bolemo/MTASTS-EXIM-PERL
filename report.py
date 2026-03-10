@@ -778,10 +778,10 @@ for logfile in args.logfiles:
             # get the used MX host
             mxhost = delivery_match.group('mxhost')
             if domain in ignore_domains:
-                #warn('Ignoring domain "%s", in ignore_domains=%s' % (domain, ignore_domains))
+                debug(f'Ignoring domain "{domain}", in ignore_domains={ignore_domains}')
                 continue
             if len(only_domains) > 0 and domain not in only_domains:
-                #warn('Ignoring domain "%s", not in only_domains=%s' % (domain, only_domains))
+                debug(f'Ignoring domain "{domain}", not in only_domains={only_domains}')
                 continue
             if domain in error_domains:
                 continue
@@ -797,10 +797,10 @@ for logfile in args.logfiles:
                     continue
             rua = tlsrpt_data[domain].report
             if rua is None:
-                #warn('Ignoring domain %s without rua set: %s' % (domain, line))
+                debug(f'Ignoring domain {domain} without rua set: {line}')
                 continue
             if rua == '':
-                warn(f'Ignoring domain {domain} without rua set to "": {line}')
+                debug(f'Ignoring domain {domain} with rua set to "": {line}')
                 continue
             # check if mx hostnames do no match this delivery line,
             # but only for successful deliveries
