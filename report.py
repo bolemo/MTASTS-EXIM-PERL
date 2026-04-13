@@ -346,6 +346,7 @@ def exim_error2tlsrpt_error(error):
         # and does not report if the cert has a host mismatch, expiry or trust issue
         'TLS session: (certificate verification failed): certificate invalid': 'validation-failure',
         'TLS session: (certificate verification failed): Verification failed. The certificate differs.': 'validation-failure',
+        'TLS session: (certificate verification failed)': 'validation-failure',
     }
     result_type = errors.get(error)
     if not result_type and ' must not be used to deliver to domain ' in error:
