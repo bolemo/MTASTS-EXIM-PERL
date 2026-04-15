@@ -28,17 +28,19 @@ This script provides reboot resistant caching of MTA-STS data.  And if the datab
 
 There are three different subroutines:
 
-#### mtasts_policy (DomainName)
+#### mtasts_policy (DomainName, Header\_TLS-Report-Submitter)
   This script will check the MTA-STS dns record and HTTP record. And will put the MTA-STS record into an LMDB database. The return will be "enforce", "testing", "none", "dane" or "fail".  A "fail" means that there is a problem with the MTA-STS information.
   
   If the Domain name is not in the database, the MTA-STS dns and http will be polled and checked.  The data will be placed into the LMDB database.
   
   If the Domain name is in the database, the expiration of the info will be checked.  If the info has expired, it will attempt to get a new record and put the data into the database.
 
-#### mtasts_valid_mx (DomainName) (HostName)
+  The second argument is optional and thus can be empty or omitted. When given, it should be the value of the `TLS-Report-Submitter` header of the mail to be delivered. That way, the function can decide wether to use policy "none" for sending TLS reports, see [Section 5.3.1 of RFC 8460](https://datatracker.ietf.org/doc/html/rfc8460#section-5.3.1) .
+
+#### mtasts\_valid\_mx (DomainName) (HostName)
   The script will check the LMDB database to determine if the hostname is within the MTA-STS mx records.  If it is not it will return the string "do_not_connect:no_match". Else an empty string is returned.
 
-#### mtasts_mx_hostlist (domainname)
+#### mtasts\_mx\_hostlist (domainname)
   Returns the MX list from the MTA-STS record as a colon seperated list.
   
 Per RFC 8461, testing allows for an mta-sts failure.  So, this will only be logged at EXIM.  In the future, this can be used with the TLSRPT feature to provide a report to the server admin.
@@ -97,8 +99,8 @@ Exim has a an experimental LMDB lookup.  This may reduce the need of the getmx s
 dnslookup_mtasts_enforce:
   debug_print = "R: dnslookup-mtasts-enforce for $local_part@$domain"
   driver = dnslookup
-# This condition uses the getmta subroutine and returns the MTA-STS policy.  If the policy is enforce continue with this router.
-  condition = ${if eq{${perl{getmta}{$domain}}}{enforce}}
+# This condition uses the mtasts_policy subroutine and returns the MTA-STS policy.  If the policy is enforce continue with this router.
+  condition = ${if eq{${perl{mtasts_policy}{$domain}{$header_TLS-Report-Submitter:}}}{enforce}}
   domains = ! +local_domains
 # Push the mail to the remote_smtp_mtasts_enforce transport
   transport = remote_smtp_mtasts_enforce
@@ -114,8 +116,8 @@ dnslookup_mtasts_enforce:
 dnslookup_mtasts_testing:
   debug_print = "R: dnslookup-mtasts-testing for $local_part@$domain"
   driver = dnslookup
-# This condition uses the getmta subroutine and returns the MTA-STS policy.  If the policy is testing continue with this router.
-  condition = ${if eq{${perl{getmta}{$domain}}}{testing}}
+# This condition uses the mtasts_policy subroutine and returns the MTA-STS policy.  If the policy is testing continue with this router.
+  condition = ${if eq{${perl{mtasts_policy}{$domain}{$header_TLS-Report-Submitter:}}}{testing}}
   domains = ! +local_domains
 # Push the email to the remote_smtp_mtasts_testing transport
   transport = remote_smtp_mtasts_testing
@@ -131,8 +133,8 @@ dnslookup_mtasts_testing:
 redirect_mtasts_fail:
   debug_print = "R: redirect-mtasts-failure for $local_part@$domain $address_data"
   driver = redirect
-# This condition uses the getmta subroutine and returns the MTA-STS policy.  If the policy is fail continue with this router.
-  condition = ${if eq{${perl{getmta}{$domain}}}{fail}}
+# This condition uses the mtasts_policy subroutine and returns the MTA-STS policy.  If the policy is fail continue with this router.
+  condition = ${if eq{${perl{mtasts_policy}{$domain}{$header_TLS-Report-Submitter:}}}{fail}}
   domains = ! +local_domains
 # Per RFC 8461 defer for another attempt later.  Hopefully the receiving agency will fix their MTA-STS.
   allow_defer
@@ -146,10 +148,10 @@ remote_smtp_mtasts_enforce:
   debug_print = "T: remote_smtp_mtasts_enforce for $local_part@$domain"
   driver = smtp
 # Do a full cert check on the MTA-STS mx host names
-  tls_verify_cert_hostnames = {${perl{getmx}{$domain}}}
+  tls_verify_cert_hostnames = {${perl{mtasts_mx_hostlist}{$domain}}}
   tls_tempfail_tryclear = false
 # Do not connect to any servers that are not listed in the MTA-STS mx.
-  event_action = ${if eq {tcp:connect}{$event_name}{${perl{getmta}{$domain}{$host}}} {}}
+  event_action = ${if eq {tcp:connect}{$event_name}{${perl{mtasts_valid_mx}{$domain}{$host}}} {}}
 .ifndef IGNORE_SMTP_LINE_LENGTH_LIMIT
   message_size_limit = ${if > {$max_received_linelength}{998} {1}{0}}
 .endif

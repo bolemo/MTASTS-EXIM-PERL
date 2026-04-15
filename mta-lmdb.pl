@@ -34,10 +34,16 @@ sub _mtasts_db_save($$$$);
 # - testing
 # - enforce
 # Input: the DNS domain to test MTA-STS for
-sub mtasts_policy($) {
-    my ($domain) = @_;
+sub mtasts_policy(@) {
+    my ($domain, $submitter) = @_;
 
-    _mtasts_debug('mtasts_policy('.$domain.')');
+    _mtasts_debug('mtasts_policy('.$domain.', submitter-header:'.$submitter.')');
+
+    # if submitter header value given, return policy none, see https://datatracker.ietf.org/doc/html/rfc8460#section-5.3.1
+    if (defined($submitter)) {
+        _mtasts_debug('mtasts_policy('.$domain.'): returning "none": Header TLS-Report-Submitter:'.$submitter.' requires that MTA-STS or DANE TLSA failures MUST NOT be honored.');
+        return 'none';
+    }
 
     # ensure domain is only lowercase
     $domain = lc($domain);
