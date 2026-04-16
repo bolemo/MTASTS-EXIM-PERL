@@ -40,7 +40,7 @@ sub mtasts_policy(@) {
     _mtasts_debug('mtasts_policy('.$domain.', submitter-header:'.$submitter.')');
 
     # if submitter header value given, return policy none, see https://datatracker.ietf.org/doc/html/rfc8460#section-5.3.1
-    if (defined($submitter)) {
+    if (defined($submitter) && ($submitter != "")) {
         _mtasts_debug('mtasts_policy('.$domain.'): returning "none": Header TLS-Report-Submitter:'.$submitter.' requires that MTA-STS or DANE TLSA failures MUST NOT be honored.');
         return 'none';
     }
