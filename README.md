@@ -148,6 +148,10 @@ remote_smtp_mtasts_enforce:
 # Do a full cert check on the MTA-STS mx host names
   tls_verify_cert_hostnames = {${perl{mtasts_mx_hostlist}{$domain}}}
   tls_tempfail_tryclear = false
+# Require TLS: refuse delivery if the remote server does not advertise STARTTLS.
+# Without this, Exim silently falls back to plaintext even in enforce mode.
+  hosts_require_tls = *
+  tls_verify_hosts = *
 # Do not connect to any servers that are not listed in the MTA-STS mx.
   event_action = ${if eq {tcp:connect}{$event_name}{${perl{mtasts_valid_mx}{$domain}{$host}}} {}}
 .ifndef IGNORE_SMTP_LINE_LENGTH_LIMIT
