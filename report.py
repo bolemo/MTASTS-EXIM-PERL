@@ -499,7 +499,7 @@ def post_report(rua_addresses, report):
         report_headers = dict(headers)
         report_data = report_gz
         if 'proton.me' in rua_address:
-            warn(
+            debug(
                 'Sending uncompressed data to proton.me '
                 'until they make the endpoint RFC-compliant.'
             )
