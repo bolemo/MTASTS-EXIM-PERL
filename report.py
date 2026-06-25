@@ -652,6 +652,7 @@ DEFAULT_ANALYSIS_ID = socket.gethostname()
 yesterday = datetime.date.today() - datetime.timedelta(days=1)
 default_only_domains = []
 default_ignore_domains = []
+default_ignore_recipients = []
 default_ignore_senders = []
 parser = argparse.ArgumentParser(description='MTA-STS report generator')
 # pylint: disable=line-too-long
@@ -663,6 +664,7 @@ parser.add_argument('--date',       type=str, help='ISO date of report (def: yes
 parser.add_argument('--bcc',        type=str, help='BCC for send mails, comma seperated')
 parser.add_argument('--only-domains',   type=str, help='only handle these domains, comma seperated', default=','.join(default_only_domains))
 parser.add_argument('--ignore-domains', type=str, help='ignore these domains, comma seperated',      default=','.join(default_ignore_domains))
+parser.add_argument('--ignore-recipients', type=str, help='ignore rua recipients, comma seperated',      default=','.join(default_ignore_recipients))
 parser.add_argument('--ignore-senders', type=str, help='ignore log entries from these senders, comma seperated',      default=','.join(default_ignore_senders))
 parser.add_argument('--dry-run',    action='store_true', help='do not MAIL or POST reports')
 parser.add_argument('--no-mails',   action='store_true', help='do not MAIL reports')
@@ -699,6 +701,7 @@ if args.org_name == DEFAULT_ORG_DOMAIN and args.org_domain != args.org_name:
     args.org_name = args.org_domain
 only_domains   = args.only_domains.split(',')   if len(args.only_domains)   else []
 ignore_domains = args.ignore_domains.split(',') if len(args.ignore_domains) else []
+ignore_recipients = args.ignore_recipients.split(',') if len(args.ignore_recipients) else []
 ignore_senders = args.ignore_senders.split(',') if len(args.ignore_senders) else []
 startdate = datetime.date.fromisoformat(args.date)
 starttime = datetime.datetime.fromisoformat(startdate.isoformat())
@@ -802,6 +805,12 @@ for logfile in args.logfiles:
                 continue
             if rua == '':
                 debug(f'Ignoring domain {domain} with rua set to "": {line}')
+                continue
+            if rua.startswith('mailto:') and rua[7:] in ignore_recipients:
+                debug(
+                    f'Ignoring domain "{domain}", '
+                    f'rua {rua} in ignore_recipients={ignore_recipients}'
+                )
                 continue
             # check if mx hostnames do no match this delivery line,
             # but only for successful deliveries
