@@ -558,6 +558,12 @@ def send_report(rpt):
         if method not in rua_methods:
             warn(f'Unsupported rua method "{method}" in rua "{rua_value}"!')
             continue
+        if rua_value.startswith('mailto:') and rua_value[7:] in ignore_recipients:
+            debug(
+                f'Ignoring email {rua_value[7:]} of domain {rpt.domain} '
+                f'as email in ignore_recipients={ignore_recipients}'
+            )
+            continue
         tasks[method].append(rua_value)
     for method, rua_values in tasks.items():
         rua_methods[method](rua_values, rpt.gen_report())
@@ -805,12 +811,6 @@ for logfile in args.logfiles:
                 continue
             if rua == '':
                 debug(f'Ignoring domain {domain} with rua set to "": {line}')
-                continue
-            if rua.startswith('mailto:') and rua[7:] in ignore_recipients:
-                debug(
-                    f'Ignoring domain "{domain}", '
-                    f'rua {rua} in ignore_recipients={ignore_recipients}'
-                )
                 continue
             # check if mx hostnames do no match this delivery line,
             # but only for successful deliveries
