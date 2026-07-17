@@ -40,7 +40,7 @@ sub mtasts_policy(@) {
     _mtasts_debug('mtasts_policy('.$domain.', submitter-header:'.$submitter.')');
 
     # if submitter header value given, return policy none, see https://datatracker.ietf.org/doc/html/rfc8460#section-5.3.1
-    if (defined($submitter) && ($submitter != "")) {
+    if (defined($submitter) && ($submitter ne '')) {
         _mtasts_debug('mtasts_policy('.$domain.'): returning "none": Header TLS-Report-Submitter:'.$submitter.' requires that MTA-STS or DANE TLSA failures MUST NOT be honored.');
         return 'none';
     }
@@ -85,9 +85,9 @@ sub mtasts_policy(@) {
     $STS = _mtasts_sts_load_policy($STS);
     # check if loading failed
     if (defined($STS->{policy_fail})) {
-        if ($STS->{policy} == 'none') {
+        if ($STS->{policy} eq 'none') {
             _mtasts_debug('mtasts_policy('.$domain.'): returning "none": good MTA-STS DNS entry but no policy available from cache or http');
-        } elsif ($STS->{policy} == 'fail') {
+        } elsif ($STS->{policy} eq 'fail') {
             _mtasts_debug('mtasts_policy('.$domain.'): returning "fail": badly formatted policy');
         } else {
             _mtasts_debug('mtasts_policy('.$domain.'): returning "fail": unknown result from _mtasts_sts_load_policy()');
@@ -168,7 +168,7 @@ sub mtasts_mx_hostlist($) {
 sub getmta(@) {
     _mtasts_warning('getmta() is deprecated. Please switch to mtasts_policy() resp. mtasts_valid_mx() API!');
     my ($domain, $host) = @_;
-    if (int(@_) eq 2) {
+    if (int(@_) == 2) {
         return mtasts_valid_mx($domain, $host);
     }
     return mtasts_policy($domain);
@@ -185,7 +185,7 @@ sub getmx($) {
 sub _mtasts_debug($) {
     my ($msg) = @_;
 
-    if (!defined($MTASTS_DEBUG) || ($MTASTS_DEBUG eq 0)) {
+    if (!defined($MTASTS_DEBUG) || ($MTASTS_DEBUG eq '0')) {
         return;
     }
     # XXX:fixme: assume running in exim if stdout is not a tty
