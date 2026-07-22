@@ -85,12 +85,12 @@ sub mtasts_policy(@) {
     $STS = _mtasts_sts_load_policy($STS);
     # check if loading failed
     if (defined($STS->{policy_fail})) {
-        if ($STS->{policy} eq 'none') {
+        if ($STS->{policy_fail} eq 'none') {
             _mtasts_debug('mtasts_policy('.$domain.'): returning "none": good MTA-STS DNS entry but no policy available from cache or http');
-        } elsif ($STS->{policy} eq 'fail') {
+        } elsif ($STS->{policy_fail} eq 'fail') {
             _mtasts_debug('mtasts_policy('.$domain.'): returning "fail": badly formatted policy');
         } else {
-            _mtasts_debug('mtasts_policy('.$domain.'): returning "fail": unknown result from _mtasts_sts_load_policy()');
+            _mtasts_debug('mtasts_policy('.$domain.'): returning "fail": unknown result from _mtasts_sts_load_policy(): policy_fail='.$STS->{policy_fail});
             return 'fail';
         }
         return $STS->{policy_fail};
