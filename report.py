@@ -332,6 +332,7 @@ def exim_error2tlsrpt_error(error):
         'SMTP error from remote mail server ',
         'Connection timed out',
         'Remote host closed connection in response to initial connection',
+        'Malformed SMTP reply in response to',
     ]
     for ign in ignored:
         if error.startswith(ign):
