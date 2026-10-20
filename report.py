@@ -331,6 +331,7 @@ def exim_error2tlsrpt_error(error):
         'SMTP timeout ',
         'SMTP error from remote mail server ',
         'Connection timed out',
+        'Connection refused',
         'Remote host closed connection in response to initial connection',
         'Malformed SMTP reply in response to',
     ]
