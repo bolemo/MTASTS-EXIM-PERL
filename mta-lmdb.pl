@@ -68,7 +68,7 @@ sub mtasts_policy(@) {
     }
 
     # If there is a Policy in the DB and the MTA-STS version in the DNS is valid, check if the version numbers are the same.
-    if ($DB->{valid} && $STS->{id} && ($DB->{id} == $STS->{id})) {
+    if ($DB->{valid} && $STS->{id} && ($DB->{id} eq $STS->{id})) {
         # Policy in the DB is good and it hasn't expired.
         # Current policy found in the DB. Send the current mode.
         _mtasts_debug('mtasts_policy('.$domain.'): returning "'.$DB->{mode}.'" from DB');
