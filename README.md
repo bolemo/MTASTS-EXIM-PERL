@@ -38,7 +38,9 @@ There are three different subroutines:
   
   If the Domain name is in the database, the expiration of the info will be checked.  If the info has expired, it will attempt to get a new record and put the data into the database.
 
-  The second argument is optional and thus can be empty or omitted. When given, it should be the value of the `TLS-Report-Submitter` header of the mail to be delivered. That way, the function can decide wether to use policy "none" for sending TLS reports, see [Section 5.3.1 of RFC 8460](https://datatracker.ietf.org/doc/html/rfc8460#section-5.3.1) .
+  If the MTA-STS dns or http record cannot be read but the info in the database has not expired, the database wins, see [Section 3.3 of RFC 8461](https://datatracker.ietf.org/doc/html/rfc8461#section-3.3).
+
+  The second argument is optional and thus can be empty or omitted. When given, it should be the value of the `TLS-Report-Submitter` header of the mail to be delivered. That way, the function can decide wether to use policy "none" for sending TLS reports, see [Section 5.3.1 of RFC 8460](https://datatracker.ietf.org/doc/html/rfc8460#section-5.3.1). Any sender can add this header to a mail to escape MTA-STS, so only pass it for your own reports, see `MTASTS_SUBMITTER` below.
 
 #### mtasts\_valid\_mx (DomainName) (HostName)
   The script will check the LMDB database to determine if the hostname is within the MTA-STS mx records.  If it is not it will return the string "do_not_connect:no_match". Else an empty string is returned.
@@ -70,6 +72,8 @@ The data structue is as follows:
 - domainname.tld:policy
   - The policy found bt Mail::STS as a string.
 
+The database is opened with `MDB_NOLOCK`, as LMDB's own locks do not survive the forks of Exim. The file `write.lock` next to the database replaces them: readers hold a shared `flock` on it, a writer an exclusive one. Any other software accessing the database must do the same, as `report.py`, `lmdb-dump.py` and `lmdb-del-key.py` do.
+
 
 ### A few notes:
 Ensure the path variable is set to someplace your Exim can read/write.  In my case it's /var/spool/exim4.
@@ -91,6 +95,10 @@ Exim has a an experimental LMDB lookup.  This may reduce the need of the getmx s
 ```
   perl_startup = do '<path-to-script>/mtasts-startup.pl'
   perl_at_start = true
+
+# TLS-Report-Submitter is only trusted on our own reports: any sender could add
+# this header to escape MTA-STS. Use the address given to report.py --contact.
+MTASTS_SUBMITTER = ${if eq{$sender_address}{<report-contact-address>}{$header_TLS-Report-Submitter:}}
 ```
 
 #### Example Exim Routers:
@@ -100,7 +108,7 @@ dnslookup_mtasts_enforce:
   debug_print = "R: dnslookup-mtasts-enforce for $local_part@$domain"
   driver = dnslookup
 # This condition uses the mtasts_policy subroutine and returns the MTA-STS policy.  If the policy is enforce continue with this router.
-  condition = ${if eq{${perl{mtasts_policy}{$domain}{$header_TLS-Report-Submitter:}}}{enforce}}
+  condition = ${if eq{${perl{mtasts_policy}{$domain}{MTASTS_SUBMITTER}}}{enforce}}
   domains = ! +local_domains
 # Push the mail to the remote_smtp_mtasts_enforce transport
   transport = remote_smtp_mtasts_enforce
@@ -117,7 +125,7 @@ dnslookup_mtasts_testing:
   debug_print = "R: dnslookup-mtasts-testing for $local_part@$domain"
   driver = dnslookup
 # This condition uses the mtasts_policy subroutine and returns the MTA-STS policy.  If the policy is testing continue with this router.
-  condition = ${if eq{${perl{mtasts_policy}{$domain}{$header_TLS-Report-Submitter:}}}{testing}}
+  condition = ${if eq{${perl{mtasts_policy}{$domain}{MTASTS_SUBMITTER}}}{testing}}
   domains = ! +local_domains
 # Push the email to the remote_smtp_mtasts_testing transport
   transport = remote_smtp_mtasts_testing
@@ -134,7 +142,7 @@ redirect_mtasts_fail:
   debug_print = "R: redirect-mtasts-failure for $local_part@$domain $address_data"
   driver = redirect
 # This condition uses the mtasts_policy subroutine and returns the MTA-STS policy.  If the policy is fail continue with this router.
-  condition = ${if eq{${perl{mtasts_policy}{$domain}{$header_TLS-Report-Submitter:}}}{fail}}
+  condition = ${if eq{${perl{mtasts_policy}{$domain}{MTASTS_SUBMITTER}}}{fail}}
   domains = ! +local_domains
 # Per RFC 8461 defer for another attempt later.  Hopefully the receiving agency will fix their MTA-STS.
   allow_defer
@@ -147,8 +155,11 @@ redirect_mtasts_fail:
 remote_smtp_mtasts_enforce:
   debug_print = "T: remote_smtp_mtasts_enforce for $local_part@$domain"
   driver = smtp
+# $domain, used below, is only set when a delivery handles a single domain.
+# Without this, a mail to two domains sharing the same MX hosts is deferred.
+  multi_domain = false
 # Do a full cert check on the MTA-STS mx host names
-  tls_verify_cert_hostnames = {${perl{mtasts_mx_hostlist}{$domain}}}
+  tls_verify_cert_hostnames = ${perl{mtasts_mx_hostlist}{$domain}}
   tls_tempfail_tryclear = false
 # Require TLS: refuse delivery if the remote server does not advertise STARTTLS.
 # Without this, Exim silently falls back to plaintext even in enforce mode.
