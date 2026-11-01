@@ -746,7 +746,8 @@ if send_analysis:
     sys.exit(0)
 
 # mta-lmdb.pl opens the DB with MDB_NOLOCK: share its lock file while reading
-with open(os.path.join(args.lmdb, 'write.lock'), 'a', encoding='ascii') as lockfile:
+lockfd = os.open(os.path.join(args.lmdb, 'write.lock'), os.O_RDONLY | os.O_CREAT, 0o666)
+with os.fdopen(lockfd) as lockfile:
     fcntl.flock(lockfile, fcntl.LOCK_SH)
     # open LMDB database
     env = lmdb.open(args.lmdb, max_dbs=10, readonly=True, lock=False)

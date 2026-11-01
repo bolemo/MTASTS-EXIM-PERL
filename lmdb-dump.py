@@ -8,7 +8,8 @@ import lmdb
 lmdb_path = sys.argv[1]
 
 # mta-lmdb.pl opens the DB with MDB_NOLOCK: share its lock file while reading
-with open(os.path.join(lmdb_path, 'write.lock'), 'a') as lockfile:
+lockfd = os.open(os.path.join(lmdb_path, 'write.lock'), os.O_RDONLY | os.O_CREAT, 0o666)
+with os.fdopen(lockfd) as lockfile:
     fcntl.flock(lockfile, fcntl.LOCK_SH)
     env = lmdb.open(lmdb_path, max_dbs=10, readonly=True, lock=False)
     db = env.open_db()

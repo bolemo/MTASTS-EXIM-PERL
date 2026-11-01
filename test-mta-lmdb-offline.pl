@@ -95,7 +95,7 @@ for my $ids (['abc123', 'def456'], ['20260101T000000', '20260101T120000']) {
 }
 
 # ----- a valid cached policy applies without a live one (RFC 8461 section 3.3)
-$LIVE{'cache.example'} = live_policy('1', 'enforce', 'mx.cache.example', 2);
+$LIVE{'cache.example'} = live_policy('1', 'enforce', 'mx.cache.example', 5);
 is(mtasts_policy('cache.example'), 'enforce', 'cache: first policy');
 $LIVE{'cache.example'} = {};
 is(mtasts_policy('cache.example'), 'enforce', 'cache: TXT record gone');
@@ -103,7 +103,7 @@ $LIVE{'cache.example'} = { id => '2' };
 is(mtasts_policy('cache.example'), 'enforce', 'cache: new id, HTTPS fetch fails');
 $LIVE{'cache.example'} = { id => '2', policy => { broken => 1 } };
 is(mtasts_policy('cache.example'), 'enforce', 'cache: new id, badly formatted policy');
-sleep(3);
+sleep(6);
 $LIVE{'cache.example'} = {};
 is(mtasts_policy('cache.example'), 'none', 'cache expired: TXT record gone');
 $LIVE{'cache.example'} = { id => '2' };
@@ -138,6 +138,7 @@ sub child_finishes_while_locked {
     my $finished = (waitpid($pid, POSIX::WNOHANG) == $pid);
     close($lockfh);
     waitpid($pid, 0) if (! $finished);
+    die("child failed: $?") if ($? != 0);
     return $finished;
 }
 my $save = sub {
@@ -148,18 +149,56 @@ ok(! child_finishes_while_locked(LOCK_EX, $query), 'reader waits for a writer');
 ok(! child_finishes_while_locked(LOCK_SH, $save), 'writer waits for a reader');
 ok(child_finishes_while_locked(LOCK_SH, $query), 'readers do not wait for each other');
 
+# ----- the lock needs no write access to the file
+SKIP: {
+    skip('running as root', 3) if ($> == 0);
+    @WARNINGS = ();
+    chmod(0444, "$MTASTS_LMDB_PATH/write.lock");
+    ok(! child_finishes_while_locked(LOCK_SH, $save), 'read-only lock file: locks still exclude each other');
+    my $DB = _mtasts_db_query('new.example', time());
+    chmod(0666, "$MTASTS_LMDB_PATH/write.lock");
+    ok($DB->{valid}, 'read-only lock file: reading works');
+    is_deeply(\@WARNINGS, [], 'read-only lock file: no warning');
+}
+
 # ----- reading goes on when the lock cannot be taken
 SKIP: {
     skip('running as root', 2) if ($> == 0);
     @WARNINGS = ();
     chmod(0, "$MTASTS_LMDB_PATH/write.lock");
     my $DB = _mtasts_db_query('new.example', time());
-    chmod(0644, "$MTASTS_LMDB_PATH/write.lock");
+    chmod(0666, "$MTASTS_LMDB_PATH/write.lock");
     ok($DB->{valid}, 'lock file unusable: reading still works');
     is(scalar(@WARNINGS), 1, 'lock file unusable: one warning');
 }
 
-# ----- concurrent writers and readers always see a complete entry
+# ----- a stuck holder of the lock does not stop mail: reading goes on, writing is given up
+{
+    pipe(my $go_read, my $go_write) or die("pipe: $!");
+    my $pid = fork();
+    if (! $pid) {
+        close($go_write);
+        <$go_read>;
+        @WARNINGS = ();
+        my $DB = _mtasts_db_query('new.example', time());
+        my $read_ok = ($DB->{valid} && (scalar(@WARNINGS) == 1));
+        @WARNINGS = ();
+        _mtasts_db_save('stuck.example', { max_age => 60, id => '1', mode => 'enforce', mx => ['mx.stuck.example'] }, time());
+        my $write_given_up = (scalar(@WARNINGS) == 2);
+        _exit(($read_ok && $write_given_up) ? 0 : 1);
+    }
+    close($go_read);
+    my $lockfh = _mtasts_db_lock(LOCK_EX);
+    close($go_write);
+    waitpid($pid, 0);
+    is($?, 0, 'lock held for too long: reader goes on, writer gives up, with warnings');
+    close($lockfh);
+    ok(! _mtasts_db_query('stuck.example', time())->{valid}, 'lock held for too long: nothing written');
+}
+
+# ----- smoke test: concurrent writers and readers run without any error. LMDB's
+# snapshots hide partial entries even without our lock, the tests above check that one.
+# Readers pause: flock is not fair, readers in a tight loop would starve the writers.
 @WARNINGS = ();
 my $end = time() + 5;
 my @pids;
@@ -183,6 +222,7 @@ for my $reader (1 .. 8) {
             my $DB = eval { _mtasts_db_query('stress.example', time()) };
             $bad++ if (! defined($DB));
             $bad++ if ($DB->{valid} && ($DB->{mx}->[0] ne 'mx'.$DB->{id}.'.example'));
+            select(undef, undef, undef, 0.005);
         }
         _exit(($bad || @WARNINGS) ? 1 : 0);
     }
@@ -193,6 +233,6 @@ for my $pid (@pids) {
     waitpid($pid, 0);
     $failed++ if ($? != 0);
 }
-is($failed, 0, 'concurrent writers and readers: no error and no partial entry');
+is($failed, 0, 'concurrent writers and readers: no error');
 
 done_testing();

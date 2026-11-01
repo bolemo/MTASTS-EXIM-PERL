@@ -344,19 +344,26 @@ sub _mtasts_db_open($) {
 sub _mtasts_db_lock($) {
     my ($mode) = @_;
 
-    use Fcntl qw(:flock);
+    use Fcntl qw(:flock O_RDONLY O_CREAT);
 
     my $lockfile = $MTASTS_LMDB_PATH.'/write.lock';
 
-    # append mode creates the file if needed and never truncates it
-    open(my $lockfh, '>>', $lockfile) or do {
+    # flock needs no write access: routers (root) and transports (exim user)
+    # can both use the file, whichever created it
+    sysopen(my $lockfh, $lockfile, O_RDONLY|O_CREAT, 0666) or do {
         _mtasts_warning('_mtasts_db_lock(): could not open lock file '.$lockfile.': '.$!);
         return undef;
     };
-    flock($lockfh, $mode) or do {
-        _mtasts_warning('_mtasts_db_lock(): could not acquire lock: '.$!);
-        return undef;
-    };
+
+    # the lock is only held for milliseconds: do not let a stuck process stop all mail
+    my $deadline = time() + 5;
+    until (flock($lockfh, $mode | LOCK_NB)) {
+        if (! ($!{EWOULDBLOCK} || $!{EINTR}) || (time() >= $deadline)) {
+            _mtasts_warning('_mtasts_db_lock(): could not acquire lock: '.$!);
+            return undef;
+        }
+        select(undef, undef, undef, 0.01);
+    }
 
     return $lockfh;
 }
