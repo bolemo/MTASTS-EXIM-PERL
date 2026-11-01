@@ -275,12 +275,14 @@ sub _mtasts_sts_load_policy($) {
 
 # Ensure the LMDB directory exists.
 # Safe to call even if the directory already exists.
+# Routers run as root and transports as the exim user, whichever creates the
+# directory and the DB (see _mtasts_db_open()): both need access, through exim's group.
 sub _mtasts_db_init() {
     use File::Path qw(make_path);
 
     my $path = $MTASTS_LMDB_PATH;
 
-    make_path($path, { error => \my $err });
+    make_path($path, { mode => 0770, error => \my $err });
     if ($err && @$err) {
         for my $diag (@$err) {
             my ($file, $message) = %$diag;
@@ -313,6 +315,7 @@ sub _mtasts_db_open($) {
         $env = LMDB::Env->new($path, {
             mapsize => 100 * 1024 * 1024 * 1024,
             flags   => $flags,
+            mode    => 0660,
         });
     } or do {
         _mtasts_warning('_mtasts_db_open(): could not create LMDB env: '.$LMDB_File::last_err);
