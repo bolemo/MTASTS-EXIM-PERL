@@ -77,6 +77,11 @@ sub mtasts_policy(@) {
 
     # If not, check if there is a STS id
     if (! $STS->{id}) {
+        # RFC 8461 section 3.3: without a live policy, a valid cached policy MUST be applied
+        if ($DB->{valid}) {
+            _mtasts_debug('mtasts_policy('.$domain.'): returning "'.$DB->{mode}.'" from DB: no MTA-STS record in the DNS but cached policy still valid');
+            return $DB->{mode};
+        }
         # No Policy in the DB and there is no MTA-STS record in the DNS.
         _mtasts_debug('mtasts_policy('.$domain.'): returning "none": No Policy in the DB and there is no MTA-STS record in the DNS');
         return 'none';
@@ -87,6 +92,11 @@ sub mtasts_policy(@) {
     $STS = _mtasts_sts_load_policy($STS);
     # check if loading failed
     if (defined($STS->{policy_fail})) {
+        # RFC 8461 section 3.3: without a live policy, a valid cached policy MUST be applied
+        if ($DB->{valid}) {
+            _mtasts_debug('mtasts_policy('.$domain.'): returning "'.$DB->{mode}.'" from DB: could not load new policy but cached policy still valid');
+            return $DB->{mode};
+        }
         if ($STS->{policy_fail} eq 'none') {
             _mtasts_debug('mtasts_policy('.$domain.'): returning "none": good MTA-STS DNS entry but no policy available from cache or http');
         } elsif ($STS->{policy_fail} eq 'fail') {
