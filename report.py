@@ -11,6 +11,8 @@ a report generator for TLSRPT report (RFC8460) using exim logs
 # pylint: disable=use-dict-literal
 
 import sys
+import os
+import fcntl
 import argparse
 import io
 import gzip
@@ -743,19 +745,22 @@ if send_analysis:
     redis_remove_keys(stored_reports.keys())
     sys.exit(0)
 
-# open LMDB database
-env = lmdb.open(args.lmdb, max_dbs=10, readonly=True)
-db = env.open_db()
-# iterate over all entries
-with env.begin() as txn:
-    # the very first entry is the name of the db and the value is not decodable, so we skip it
-    for key, value in list(txn.cursor(db=db))[1:]:
-        k, v = key.decode(), value.decode()
-        domain, attr = k.split(':', maxsplit=1)
-        # store the domain as part of the 'tlsrpt' struct
-        tlsrpt_data[domain].domain = domain
-        # store all values in the corresponding attr
-        setattr(tlsrpt_data[domain], attr, v.split(':') if attr == 'mx' else v)
+# mta-lmdb.pl opens the DB with MDB_NOLOCK: share its lock file while reading
+with open(os.path.join(args.lmdb, 'write.lock'), 'a', encoding='ascii') as lockfile:
+    fcntl.flock(lockfile, fcntl.LOCK_SH)
+    # open LMDB database
+    env = lmdb.open(args.lmdb, max_dbs=10, readonly=True, lock=False)
+    db = env.open_db()
+    # iterate over all entries
+    with env.begin() as txn:
+        # the very first entry is the name of the db and the value is not decodable, so we skip it
+        for key, value in list(txn.cursor(db=db))[1:]:
+            k, v = key.decode(), value.decode()
+            domain, attr = k.split(':', maxsplit=1)
+            # store the domain as part of the 'tlsrpt' struct
+            tlsrpt_data[domain].domain = domain
+            # store all values in the corresponding attr
+            setattr(tlsrpt_data[domain], attr, v.split(':') if attr == 'mx' else v)
 
 
 # generate a regex from all domains

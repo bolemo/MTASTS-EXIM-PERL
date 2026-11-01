@@ -23,6 +23,7 @@ sub _mtasts_sts_query($);
 sub _mtasts_sts_load_policy($);
 sub _mtasts_db_init();
 sub _mtasts_db_open($);
+sub _mtasts_db_lock($);
 sub _mtasts_db_query($$);
 sub _mtasts_db_save($$$);
 
@@ -297,8 +298,8 @@ sub _mtasts_db_init() {
 # Open a fresh LMDB env with MDB_NOLOCK.
 # Each call returns a new env object; caller must ensure it goes out of scope
 # (or is explicitly undef'd) to close it promptly.
-# For write access, pass a true value as argument; caller must hold the
-# flock on the write lockfile before calling this function.
+# For write access, pass a true value as argument.
+# Caller must hold the lock from _mtasts_db_lock() before calling this function.
 sub _mtasts_db_open($) {
     my ($write) = @_;
 
@@ -332,6 +333,31 @@ sub _mtasts_db_open($) {
     return $env;
 }
 
+# Take the lock MDB_NOLOCK leaves to us: LMDB requires that no reader uses an
+# old transaction while a writer is active. Readers share it (LOCK_SH), a
+# writer holds it alone (LOCK_EX). This is fork-safe and process-safe.
+# Returns the file handle holding the lock, the lock is released when it goes
+# out of scope. Returns undef on error.
+sub _mtasts_db_lock($) {
+    my ($mode) = @_;
+
+    use Fcntl qw(:flock);
+
+    my $lockfile = $MTASTS_LMDB_PATH.'/write.lock';
+
+    # append mode creates the file if needed and never truncates it
+    open(my $lockfh, '>>', $lockfile) or do {
+        _mtasts_warning('_mtasts_db_lock(): could not open lock file '.$lockfile.': '.$!);
+        return undef;
+    };
+    flock($lockfh, $mode) or do {
+        _mtasts_warning('_mtasts_db_lock(): could not acquire lock: '.$!);
+        return undef;
+    };
+
+    return $lockfh;
+}
+
 sub _mtasts_db_query($$) {
     my ($domain, $now) = @_;
 
@@ -343,7 +369,11 @@ sub _mtasts_db_query($$) {
         return \%DB;
     }
 
-    # open a fresh env for this read; no lock needed (MDB_NOLOCK + ro txn)
+    # shared lock until we return; on failure _mtasts_db_lock() warns and we
+    # read anyway: a short unlocked read is better than deferring all mail
+    my $lockfh = _mtasts_db_lock(LOCK_SH);
+
+    # open a fresh env for this read
     my $env = _mtasts_db_open(0);
     if (! defined($env)) {
         _mtasts_warning('_mtasts_db_query(): _mtasts_db_open() failed');
@@ -376,7 +406,7 @@ sub _mtasts_db_query($$) {
         $DB{valid} = 0;
     };
     eval { $txn->abort() };
-    # $env goes out of scope here, closing the environment
+    # $lockfh and $env go out of scope here, releasing the lock and closing the environment
 
     return \%DB;
 }
@@ -384,32 +414,22 @@ sub _mtasts_db_query($$) {
 sub _mtasts_db_save($$$) {
     my ($domain, $STS, $now) = @_;
 
-    use Fcntl qw(:flock);
-
     # ensure the directory exists first: the lock file lives in it
     if (! _mtasts_db_init()) {
         _mtasts_warning('_mtasts_db_save(): _mtasts_db_init() failed');
         return;
     }
 
-    my $lockfile = $MTASTS_LMDB_PATH.'/write.lock';
-
-    # acquire exclusive write lock; this is fork-safe and process-safe
-    open(my $lockfh, '>', $lockfile) or do {
-        _mtasts_warning('_mtasts_db_save(): could not open lock file '.$lockfile.': '.$!);
+    # exclusive lock until we return
+    my $lockfh = _mtasts_db_lock(LOCK_EX);
+    if (! defined($lockfh)) {
+        _mtasts_warning('_mtasts_db_save(): _mtasts_db_lock() failed');
         return;
-    };
-    flock($lockfh, LOCK_EX) or do {
-        _mtasts_warning('_mtasts_db_save(): could not acquire write lock: '.$!);
-        close($lockfh);
-        return;
-    };
+    }
 
     my $env = _mtasts_db_open(1);
     if (! defined($env)) {
         _mtasts_warning('_mtasts_db_save(): _mtasts_db_open() failed');
-        flock($lockfh, LOCK_UN);
-        close($lockfh);
         return;
     }
 
@@ -417,8 +437,6 @@ sub _mtasts_db_save($$$) {
     my $txn = $env->BeginTxn();
     if (! defined($txn)) {
         _mtasts_warning('_mtasts_db_save(): could not begin read-write transaction: '.$LMDB_File::last_err);
-        flock($lockfh, LOCK_UN);
-        close($lockfh);
         return;
     }
     my $db = $txn->OpenDB();
@@ -433,8 +451,5 @@ sub _mtasts_db_save($$$) {
     $db->put($domain.':mx', $mx, MDB_NODUPDATA);
 
     $txn->commit();
-    # $env goes out of scope here, closing the environment
-
-    flock($lockfh, LOCK_UN);
-    close($lockfh);
+    # $lockfh and $env go out of scope here, releasing the lock and closing the environment
 }
