@@ -74,6 +74,8 @@ The data structue is as follows:
 
 The database is opened with `MDB_NOLOCK`, as LMDB's own locks do not survive the forks of Exim. The file `write.lock` next to the database replaces them: readers hold a shared `flock` on it, a writer an exclusive one. Any other software accessing the database must do the same, as `report.py`, `lmdb-dump.py` and `lmdb-del-key.py` do.
 
+To forget a cached policy, for example for a domain that removed its MTA-STS record and moved its MX hosts before the policy expired: `lmdb-del-key.py <path-to-database> domainname.tld:expire`.
+
 
 ### A few notes:
 Ensure the path variable is set to someplace your Exim can read/write.  In my case it's /var/spool/exim4.
@@ -96,9 +98,10 @@ Exim has a an experimental LMDB lookup.  This may reduce the need of the getmx s
   perl_startup = do '<path-to-script>/mtasts-startup.pl'
   perl_at_start = true
 
-# TLS-Report-Submitter is only trusted on our own reports: any sender could add
-# this header to escape MTA-STS. Use the address given to report.py --contact.
-MTASTS_SUBMITTER = ${if eq{$sender_address}{<report-contact-address>}{$header_TLS-Report-Submitter:}}
+# TLS-Report-Submitter is only trusted on our own reports, which report.py sends
+# without authentication from localhost: any sender could otherwise add this header
+# to escape MTA-STS. Use the address given to report.py --contact.
+MTASTS_SUBMITTER = ${if and{{eq{$sender_address}{<report-contact-address>}}{match_ip{$sender_host_address}{<; 127.0.0.1 ; ::1}}{!def:authenticated_id}}{$header_TLS-Report-Submitter:}}
 ```
 
 #### Example Exim Routers:
