@@ -69,7 +69,7 @@ sub mtasts_policy(@) {
     }
 
     # If there is a Policy in the DB and the MTA-STS version in the DNS is valid, check if the version numbers are the same.
-    if ($DB->{valid} && $STS->{id} && ($DB->{id} eq $STS->{id})) {
+    if ($DB->{valid} && defined($STS->{id}) && ($DB->{id} eq $STS->{id})) {
         # Policy in the DB is good and it hasn't expired.
         # Current policy found in the DB. Send the current mode.
         _mtasts_debug('mtasts_policy('.$domain.'): returning "'.$DB->{mode}.'" from DB');
@@ -77,7 +77,7 @@ sub mtasts_policy(@) {
     }
 
     # If not, check if there is a STS id
-    if (! $STS->{id}) {
+    if (! defined($STS->{id})) {
         # RFC 8461 section 3.3: without a live policy, a valid cached policy MUST be applied
         if ($DB->{valid}) {
             _mtasts_debug('mtasts_policy('.$domain.'): returning "'.$DB->{mode}.'" from DB: no MTA-STS record in the DNS but cached policy still valid');
@@ -98,15 +98,10 @@ sub mtasts_policy(@) {
             _mtasts_debug('mtasts_policy('.$domain.'): returning "'.$DB->{mode}.'" from DB: could not load new policy but cached policy still valid');
             return $DB->{mode};
         }
-        if ($STS->{policy_fail} eq 'none') {
-            _mtasts_debug('mtasts_policy('.$domain.'): returning "none": good MTA-STS DNS entry but no policy available from cache or http');
-        } elsif ($STS->{policy_fail} eq 'fail') {
-            _mtasts_debug('mtasts_policy('.$domain.'): returning "fail": badly formatted policy');
-        } else {
-            _mtasts_debug('mtasts_policy('.$domain.'): returning "fail": unknown result from _mtasts_sts_load_policy(): policy_fail='.$STS->{policy_fail});
-            return 'fail';
-        }
-        return $STS->{policy_fail};
+        # RFC 8461 section 3.3: if no policy can be fetched "for any reason" and none is
+        # cached, delivery MUST continue as though the domain has not implemented MTA-STS
+        _mtasts_debug('mtasts_policy('.$domain.'): returning "none": good MTA-STS DNS entry but nothing in cache and '.$STS->{policy_fail});
+        return 'none';
     };
 
     # and save in DB
@@ -235,12 +230,11 @@ sub _mtasts_sts_query($) {
         return \%STS;
     }
 
-    # analyse STS
+    # analyse STS: without a usable record, id stays undefined ("0" is a valid id)
     eval {
         $STS{domain}->sts;
-        $STS{id} = $STS{domain}->sts->id;
-    } or do {
-        $STS{id} = 0;
+        my $id = $STS{domain}->sts->id;
+        $STS{id} = $id if (length($id));
     };
     eval {
         $STS{rua} = $STS{domain}->tlsrpt->rua;
@@ -256,7 +250,7 @@ sub _mtasts_sts_load_policy($) {
     eval {
         $policy = $STS->{domain}->policy;
     } or do {
-        $STS->{policy_fail} = 'none';
+        $STS->{policy_fail} = 'no policy available from http';
         return $STS;
     };
 
@@ -265,9 +259,14 @@ sub _mtasts_sts_load_policy($) {
         $STS->{mode}    = $policy->mode;
         $STS->{max_age} = $policy->max_age;
         $STS->{policy}  = $policy->as_string;
+        # Mail::STS does not check that these are present: without MX hosts, mode
+        # enforce would refuse all of them until the policy expires
+        defined($STS->{max_age}) or die("no max_age\n");
+        (@{$STS->{mx}} || ($STS->{mode} eq 'none')) or die("no mx\n");
+        1;
     } or do {
         # Found some aspects of a policy, but it is badly formatted
-        $STS->{policy_fail} = 'fail';
+        $STS->{policy_fail} = 'badly formatted policy: '.$@;
     };
 
     return $STS;

@@ -109,6 +109,33 @@ is(mtasts_policy('cache.example'), 'none', 'cache expired: TXT record gone');
 $LIVE{'cache.example'} = { id => '2' };
 is(mtasts_policy('cache.example'), 'none', 'cache expired: new id, HTTPS fetch fails');
 
+# ----- an unusable policy is handled as no policy (RFC 8461 section 3.3) and is not cached
+for my $case (['no mx', { mode => 'enforce', mx => [], max_age => 86400 }],
+              ['no max_age', { mode => 'enforce', mx => ['mx.bad.example'] }],
+              ['badly formatted', { broken => 1 }]) {
+    my ($name, $policy) = @$case;
+    $LIVE{'bad.example'} = { id => '1', policy => { %$policy } };
+    is(mtasts_policy('bad.example'), 'none', "$name: policy none");
+    is(mtasts_valid_mx('bad.example', 'mx.bad.example'), 'do_not_connect:no_entry', "$name: not cached");
+}
+$LIVE{'kept.example'} = live_policy('1', 'enforce', 'mx.kept.example');
+is(mtasts_policy('kept.example'), 'enforce', 'unusable policy: first a good one');
+$LIVE{'kept.example'} = { id => '2', policy => { mode => 'enforce', mx => [], max_age => 86400 } };
+is(mtasts_policy('kept.example'), 'enforce', 'unusable policy: cached one still applied');
+is(mtasts_valid_mx('kept.example', 'mx.kept.example'), '', 'unusable policy: cached MX kept');
+$LIVE{'modenone.example'} = { id => '1', policy => { mode => 'none', mx => [], max_age => 86400 } };
+is(mtasts_policy('modenone.example'), 'none', 'mode none without mx: accepted');
+ok(_mtasts_db_query('modenone.example', time())->{valid}, 'mode none without mx: cached');
+
+# ----- "0" is a valid policy id, an empty one is not
+$LIVE{'zero.example'} = live_policy('0', 'enforce', 'mx.zero.example');
+is(mtasts_policy('zero.example'), 'enforce', 'id 0: policy applied');
+is(mtasts_valid_mx('zero.example', 'mx.zero.example'), '', 'id 0: policy cached');
+$LIVE{'zero.example'} = live_policy('0', 'testing', 'mx.zero.example');
+is(mtasts_policy('zero.example'), 'enforce', 'id 0 unchanged: policy from the DB');
+$LIVE{'emptyid.example'} = live_policy('', 'enforce', 'mx.emptyid.example');
+is(mtasts_policy('emptyid.example'), 'none', 'empty id: handled as no record');
+
 # ----- TLS-Report-Submitter
 $LIVE{'report.example'} = live_policy('1', 'enforce', 'mx.report.example');
 is(mtasts_policy('report.example', 'example.org'), 'none', 'submitter given: policy none');

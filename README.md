@@ -32,7 +32,7 @@ This script provides reboot resistant caching of MTA-STS data.  And if the datab
 There are three different subroutines:
 
 #### mtasts_policy (DomainName, Header\_TLS-Report-Submitter)
-  This script will check the MTA-STS dns record and HTTP record. And will put the MTA-STS record into an LMDB database. The return will be "enforce", "testing", "none", "dane" or "fail".  A "fail" means that there is a problem with the MTA-STS information.
+  This script will check the MTA-STS dns record and HTTP record. And will put the MTA-STS record into an LMDB database. The return will be "enforce", "testing", "none", "dane" or "fail".  A "fail" means that the database could not be used.  A policy that cannot be fetched or is unusable (no `mx` or no `max_age`) is handled as no policy, see [Section 3.3 of RFC 8461](https://datatracker.ietf.org/doc/html/rfc8461#section-3.3).
   
   If the Domain name is not in the database, the MTA-STS dns and http will be polled and checked.  The data will be placed into the LMDB database.
   
