@@ -272,9 +272,8 @@ sub _mtasts_sts_load_policy($) {
     return $STS;
 }
 
-# Ensure the LMDB directory exists and the database has been created.
-# Must be called with a write lock held (i.e. from _mtasts_db_save).
-# Safe to call even if the directory/db already exist.
+# Ensure the LMDB directory exists.
+# Safe to call even if the directory already exists.
 sub _mtasts_db_init() {
     use File::Path qw(make_path);
 
@@ -338,6 +337,12 @@ sub _mtasts_db_query($$) {
 
     my %DB;
 
+    # no DB yet means nothing cached: _mtasts_db_save() creates it on the first write
+    if (! -e "$MTASTS_LMDB_PATH/data.mdb") {
+        $DB{valid} = 0;
+        return \%DB;
+    }
+
     # open a fresh env for this read; no lock needed (MDB_NOLOCK + ro txn)
     my $env = _mtasts_db_open(0);
     if (! defined($env)) {
@@ -381,6 +386,12 @@ sub _mtasts_db_save($$$) {
 
     use Fcntl qw(:flock);
 
+    # ensure the directory exists first: the lock file lives in it
+    if (! _mtasts_db_init()) {
+        _mtasts_warning('_mtasts_db_save(): _mtasts_db_init() failed');
+        return;
+    }
+
     my $lockfile = $MTASTS_LMDB_PATH.'/write.lock';
 
     # acquire exclusive write lock; this is fork-safe and process-safe
@@ -393,14 +404,6 @@ sub _mtasts_db_save($$$) {
         close($lockfh);
         return;
     };
-
-    # ensure directory and DB exist (safe to call even if already initialised)
-    if (! _mtasts_db_init()) {
-        _mtasts_warning('_mtasts_db_save(): _mtasts_db_init() failed');
-        flock($lockfh, LOCK_UN);
-        close($lockfh);
-        return;
-    }
 
     my $env = _mtasts_db_open(1);
     if (! defined($env)) {
