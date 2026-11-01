@@ -132,7 +132,7 @@ sub child_finishes_while_locked {
         _exit(0);
     }
     close($go_read);
-    my $lockfh = _mtasts_db_lock($mode);
+    my $lockfh = _mtasts_db_lock($mode, 5);
     close($go_write);
     select(undef, undef, undef, 1);
     my $finished = (waitpid($pid, POSIX::WNOHANG) == $pid);
@@ -172,7 +172,7 @@ SKIP: {
     is(scalar(@WARNINGS), 1, 'lock file unusable: one warning');
 }
 
-# ----- a stuck holder of the lock does not stop mail: reading goes on, writing is given up
+# ----- a stuck holder of the lock does not stop mail: reading goes on, waiting has an end
 {
     pipe(my $go_read, my $go_write) or die("pipe: $!");
     my $pid = fork();
@@ -182,18 +182,27 @@ SKIP: {
         @WARNINGS = ();
         my $DB = _mtasts_db_query('new.example', time());
         my $read_ok = ($DB->{valid} && (scalar(@WARNINGS) == 1));
-        @WARNINGS = ();
-        _mtasts_db_save('stuck.example', { max_age => 60, id => '1', mode => 'enforce', mx => ['mx.stuck.example'] }, time());
-        my $write_given_up = (scalar(@WARNINGS) == 2);
-        _exit(($read_ok && $write_given_up) ? 0 : 1);
+        my $lock_given_up = (! defined(_mtasts_db_lock(LOCK_EX, 1)));
+        _exit(($read_ok && $lock_given_up) ? 0 : 1);
     }
     close($go_read);
-    my $lockfh = _mtasts_db_lock(LOCK_EX);
+    my $lockfh = _mtasts_db_lock(LOCK_EX, 5);
     close($go_write);
     waitpid($pid, 0);
-    is($?, 0, 'lock held for too long: reader goes on, writer gives up, with warnings');
+    is($?, 0, 'lock held for too long: reader goes on with a warning, waiting has an end');
     close($lockfh);
-    ok(! _mtasts_db_query('stuck.example', time())->{valid}, 'lock held for too long: nothing written');
+}
+
+# ----- an empty DB file, as seen while the first write creates it, is left alone
+{
+    my $path = $MTASTS_LMDB_PATH;
+    $MTASTS_LMDB_PATH = "$tmp/empty";
+    mkdir($MTASTS_LMDB_PATH);
+    open(my $empty, '>', "$MTASTS_LMDB_PATH/data.mdb") or die("data.mdb: $!");
+    close($empty);
+    ok(! _mtasts_db_query('new.example', time())->{valid}, 'empty DB file: nothing cached');
+    is(-s "$MTASTS_LMDB_PATH/data.mdb", 0, 'empty DB file: not written by a reader');
+    $MTASTS_LMDB_PATH = $path;
 }
 
 # ----- smoke test: concurrent writers and readers run without any error. LMDB's

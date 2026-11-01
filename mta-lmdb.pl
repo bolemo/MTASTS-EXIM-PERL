@@ -23,7 +23,7 @@ sub _mtasts_sts_query($);
 sub _mtasts_sts_load_policy($);
 sub _mtasts_db_init();
 sub _mtasts_db_open($);
-sub _mtasts_db_lock($);
+sub _mtasts_db_lock($$);
 sub _mtasts_db_query($$);
 sub _mtasts_db_save($$$);
 
@@ -300,8 +300,8 @@ sub _mtasts_db_init() {
 # Open a fresh LMDB env with MDB_NOLOCK.
 # Each call returns a new env object; caller must ensure it goes out of scope
 # (or is explicitly undef'd) to close it promptly.
-# For write access, pass a true value as argument.
-# Caller must hold the lock from _mtasts_db_lock() before calling this function.
+# For write access, pass a true value as argument; caller must then hold the
+# lock from _mtasts_db_lock() before calling this function.
 sub _mtasts_db_open($) {
     my ($write) = @_;
 
@@ -339,10 +339,11 @@ sub _mtasts_db_open($) {
 # Take the lock MDB_NOLOCK leaves to us: LMDB requires that no reader uses an
 # old transaction while a writer is active. Readers share it (LOCK_SH), a
 # writer holds it alone (LOCK_EX). This is fork-safe and process-safe.
+# Waits for $wait seconds at most, so that a stuck process cannot stop all mail.
 # Returns the file handle holding the lock, the lock is released when it goes
 # out of scope. Returns undef on error.
-sub _mtasts_db_lock($) {
-    my ($mode) = @_;
+sub _mtasts_db_lock($$) {
+    my ($mode, $wait) = @_;
 
     use Fcntl qw(:flock O_RDONLY O_CREAT);
 
@@ -355,8 +356,7 @@ sub _mtasts_db_lock($) {
         return undef;
     };
 
-    # the lock is only held for milliseconds: do not let a stuck process stop all mail
-    my $deadline = time() + 5;
+    my $deadline = time() + $wait;
     until (flock($lockfh, $mode | LOCK_NB)) {
         if (! ($!{EWOULDBLOCK} || $!{EINTR}) || (time() >= $deadline)) {
             _mtasts_warning('_mtasts_db_lock(): could not acquire lock: '.$!);
@@ -374,14 +374,11 @@ sub _mtasts_db_query($$) {
     my %DB;
 
     # no DB yet means nothing cached: _mtasts_db_save() creates it on the first write
-    if (! -e "$MTASTS_LMDB_PATH/data.mdb") {
+    # (-s: an empty file is being created, opening it would write to it)
+    if (! -s "$MTASTS_LMDB_PATH/data.mdb") {
         $DB{valid} = 0;
         return \%DB;
     }
-
-    # shared lock until we return; on failure _mtasts_db_lock() warns and we
-    # read anyway: a short unlocked read is better than deferring all mail
-    my $lockfh = _mtasts_db_lock(LOCK_SH);
 
     # open a fresh env for this read
     my $env = _mtasts_db_open(0);
@@ -389,6 +386,11 @@ sub _mtasts_db_query($$) {
         _mtasts_warning('_mtasts_db_query(): _mtasts_db_open() failed');
         return undef;
     }
+
+    # shared lock for the transaction only, not to keep writers waiting at peak load;
+    # on failure _mtasts_db_lock() warns and we read anyway: a short unlocked read is
+    # better than deferring all mail
+    my $lockfh = _mtasts_db_lock(LOCK_SH, 5);
 
     my $txn = $env->BeginTxn(MDB_RDONLY);
     if (! defined($txn)) {
@@ -416,7 +418,8 @@ sub _mtasts_db_query($$) {
         $DB{valid} = 0;
     };
     eval { $txn->abort() };
-    # $lockfh and $env go out of scope here, releasing the lock and closing the environment
+    undef($lockfh);
+    # $env goes out of scope here, closing the environment
 
     return \%DB;
 }
@@ -430,8 +433,9 @@ sub _mtasts_db_save($$$) {
         return;
     }
 
-    # exclusive lock until we return
-    my $lockfh = _mtasts_db_lock(LOCK_EX);
+    # exclusive lock until we return. Readers can keep it busy at peak load and
+    # giving up defers the mail, so wait much longer than they do
+    my $lockfh = _mtasts_db_lock(LOCK_EX, 60);
     if (! defined($lockfh)) {
         _mtasts_warning('_mtasts_db_save(): _mtasts_db_lock() failed');
         return;
