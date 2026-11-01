@@ -331,7 +331,9 @@ def exim_error2tlsrpt_error(error):
         'SMTP timeout ',
         'SMTP error from remote mail server ',
         'Connection timed out',
+        'Connection refused',
         'Remote host closed connection in response to initial connection',
+        'Malformed SMTP reply in response to',
     ]
     for ign in ignored:
         if error.startswith(ign):
@@ -346,6 +348,7 @@ def exim_error2tlsrpt_error(error):
         # and does not report if the cert has a host mismatch, expiry or trust issue
         'TLS session: (certificate verification failed): certificate invalid': 'validation-failure',
         'TLS session: (certificate verification failed): Verification failed. The certificate differs.': 'validation-failure',
+        'TLS session: (certificate verification failed)': 'validation-failure',
     }
     result_type = errors.get(error)
     if not result_type and ' must not be used to deliver to domain ' in error:
@@ -397,12 +400,12 @@ def parse_exim_errors(lines):
         continue
     result = []
     for error_key, count in errors.items():
-        result_type, sender_ip, receiver, mx, reason = error_key
+        result_type, sender_ip, receiver, receiving_mx, reason = error_key
         res = {
             "result-type":           result_type,
             "sending-mta-ip":        sender_ip,
             "receiving-ip":          receiver,
-            "receiving-mx-hostname": mx,
+            "receiving-mx-hostname": receiving_mx,
             "failed-session-count":  int(count),
         }
         if reason:
@@ -505,16 +508,30 @@ def post_report(rua_addresses, report):
     report_json = json.dumps(report)
     report_gz = gzip.compress(report_json.encode())
     for rua_address in rua_addresses:
+        report_headers = dict(headers)
+        report_data = report_gz
+        if 'proton.me' in rua_address:
+            debug(
+                'Sending uncompressed data to proton.me '
+                'until they make the endpoint RFC-compliant.'
+            )
+            report_headers['Content-Type'] = 'application/json'
+            report_data = report_json
         if args.dry_run:
             print('\n'.join([
                 DEBUG_SEP,
-                f'POST {rua_address} headers={headers}\n{json.dumps(report, indent=4)}\n',
+                f'POST {rua_address} headers={report_headers}\n{json.dumps(report, indent=4)}\n',
                 DEBUG_SEP
             ]))
             continue
         send_mail([f"POST@{re.sub('[/?&]', '.', rua_address[8:])}"], report, fake=True)
         try:
-            response = requests.post(rua_address, data=report_gz, headers=headers, timeout=60)
+            response = requests.post(
+                rua_address,
+                data=report_data,
+                headers=report_headers,
+                timeout=60
+            )
         except requests.exceptions.ConnectionError as connerr:
             warn(f'POST to "{rua_address}" failed with ConnectionError: {connerr}')
             continue
@@ -552,6 +569,12 @@ def send_report(rpt):
                 rua_value = 'mailto:'+rua_value
         if method not in rua_methods:
             warn(f'Unsupported rua method "{method}" in rua "{rua_value}"!')
+            continue
+        if rua_value.startswith('mailto:') and rua_value[7:] in ignore_recipients:
+            debug(
+                f'Ignoring email {rua_value[7:]} of domain {rpt.domain} '
+                f'as email in ignore_recipients={ignore_recipients}'
+            )
             continue
         tasks[method].append(rua_value)
     for method, rua_values in tasks.items():
@@ -647,6 +670,7 @@ DEFAULT_ANALYSIS_ID = socket.gethostname()
 yesterday = datetime.date.today() - datetime.timedelta(days=1)
 default_only_domains = []
 default_ignore_domains = []
+default_ignore_recipients = []
 default_ignore_senders = []
 parser = argparse.ArgumentParser(description='MTA-STS report generator')
 # pylint: disable=line-too-long
@@ -659,6 +683,7 @@ parser.add_argument('--bcc',        type=str, help='BCC for send mails, comma se
 parser.add_argument('--sending-mta-ip', type=str, help='fallback sending MTA IP if I=[...] not found in log lines', default=None)
 parser.add_argument('--only-domains',   type=str, help='only handle these domains, comma seperated', default=','.join(default_only_domains))
 parser.add_argument('--ignore-domains', type=str, help='ignore these domains, comma seperated',      default=','.join(default_ignore_domains))
+parser.add_argument('--ignore-recipients', type=str, help='ignore rua recipients, comma seperated',      default=','.join(default_ignore_recipients))
 parser.add_argument('--ignore-senders', type=str, help='ignore log entries from these senders, comma seperated',      default=','.join(default_ignore_senders))
 parser.add_argument('--dry-run',    action='store_true', help='do not MAIL or POST reports')
 parser.add_argument('--no-mails',   action='store_true', help='do not MAIL reports')
@@ -695,6 +720,7 @@ if args.org_name == DEFAULT_ORG_DOMAIN and args.org_domain != args.org_name:
     args.org_name = args.org_domain
 only_domains   = args.only_domains.split(',')   if len(args.only_domains)   else []
 ignore_domains = args.ignore_domains.split(',') if len(args.ignore_domains) else []
+ignore_recipients = args.ignore_recipients.split(',') if len(args.ignore_recipients) else []
 ignore_senders = args.ignore_senders.split(',') if len(args.ignore_senders) else []
 startdate = datetime.date.fromisoformat(args.date)
 starttime = datetime.datetime.fromisoformat(startdate.isoformat())
@@ -775,10 +801,10 @@ for logfile in args.logfiles:
             # get the used MX host
             mxhost = delivery_match.group('mxhost')
             if domain in ignore_domains:
-                #warn('Ignoring domain "%s", in ignore_domains=%s' % (domain, ignore_domains))
+                debug(f'Ignoring domain "{domain}", in ignore_domains={ignore_domains}')
                 continue
             if len(only_domains) > 0 and domain not in only_domains:
-                #warn('Ignoring domain "%s", not in only_domains=%s' % (domain, only_domains))
+                debug(f'Ignoring domain "{domain}", not in only_domains={only_domains}')
                 continue
             if domain in error_domains:
                 continue
@@ -794,10 +820,10 @@ for logfile in args.logfiles:
                     continue
             rua = tlsrpt_data[domain].report
             if rua is None:
-                #warn('Ignoring domain %s without rua set: %s' % (domain, line))
+                debug(f'Ignoring domain {domain} without rua set: {line}')
                 continue
             if rua == '':
-                warn(f'Ignoring domain {domain} without rua set to "": {line}')
+                debug(f'Ignoring domain {domain} with rua set to "": {line}')
                 continue
             # check if mx hostnames do no match this delivery line,
             # but only for successful deliveries

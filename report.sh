@@ -15,10 +15,10 @@ mmin=$(( (now_sec - min_sec) / 60 ))
 # find all log files, modified since 5min before $report_date, order by time
 mapfile -t logs < <(find /var/log/exim4/ -name 'mainlog*' -mmin -$mmin -exec ls -tr {} +)
 
-ignore_domains=''
 organization_domain=''
 ignore_domains=''
 ignore_senders=''
+ignore_recipients=''
 redis_servers=''
 redis_auth=''
 . "$base"/report.inc
@@ -34,6 +34,11 @@ cmd=(
 if [ -n "$ignore_domains" ]; then
     cmd+=(
         --ignore-domains "$ignore_domains"
+    )
+fi
+if [ -n "$ignore_recipients" ]; then
+    cmd+=(
+        --ignore-recipients "$ignore_recipients"
     )
 fi
 if [ -n "$ignore_senders" ]; then
