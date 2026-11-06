@@ -37,7 +37,7 @@ There are three different subroutines:
 
   If the MTA-STS dns or http record cannot be read but the info in the database has not expired, the database wins, see [Section 3.3 of RFC 8461](https://datatracker.ietf.org/doc/html/rfc8461#section-3.3).
 
-  The second argument is optional and thus can be empty or omitted. When given, it should be the value of the `TLS-Report-Submitter` header of the mail to be delivered. That way, the function can decide wether to use policy "none" for sending TLS reports, see [Section 5.3.1 of RFC 8460](https://datatracker.ietf.org/doc/html/rfc8460#section-5.3.1) .
+  The second argument is optional and thus can be empty or omitted. When given, it should be the value of the `TLS-Report-Submitter` header of the mail to be delivered. That way, the function can decide wether to use policy "none" for sending TLS reports, see [Section 5.3.1 of RFC 8460](https://datatracker.ietf.org/doc/html/rfc8460#section-5.3.1). Any sender can add this header to a mail to escape MTA-STS, so only pass it for your own reports, see `MTASTS_SUBMITTER` below.
 
 #### mtasts\_valid\_mx (DomainName) (HostName)
   The script will check the LMDB database to determine if the hostname is within the MTA-STS mx records.  If it is not it will return the string "do_not_connect:no_match". Else an empty string is returned.
@@ -95,6 +95,11 @@ Exim has a an experimental LMDB lookup.  This may reduce the need of the getmx s
       our $MTASTS_LMDB_PATH = '<path-to-exim-spooldir>/lmdb2'; \
       do '<path-to-script>/mta-lmdb.pl';
   perl_at_start = true
+
+# TLS-Report-Submitter is only trusted on our own reports, which report.py sends
+# without authentication from localhost: any sender could otherwise add this header
+# to escape MTA-STS. Use the address given to report.py --contact.
+MTASTS_SUBMITTER = ${if and{{eq{$sender_address}{<report-contact-address>}}{match_ip{$sender_host_address}{<; 127.0.0.1 ; ::1}}{!def:authenticated_id}}{$header_TLS-Report-Submitter:}}
 ```
 
 #### Example Exim Routers:
@@ -104,7 +109,7 @@ dnslookup_mtasts_enforce:
   debug_print = "R: dnslookup-mtasts-enforce for $local_part@$domain"
   driver = dnslookup
 # This condition uses the mtasts_policy subroutine and returns the MTA-STS policy.  If the policy is enforce continue with this router.
-  condition = ${if eq{${perl{mtasts_policy}{$domain}{$header_TLS-Report-Submitter:}}}{enforce}}
+  condition = ${if eq{${perl{mtasts_policy}{$domain}{MTASTS_SUBMITTER}}}{enforce}}
   domains = ! +local_domains
 # Push the mail to the remote_smtp_mtasts_enforce transport
   transport = remote_smtp_mtasts_enforce
@@ -121,7 +126,7 @@ dnslookup_mtasts_testing:
   debug_print = "R: dnslookup-mtasts-testing for $local_part@$domain"
   driver = dnslookup
 # This condition uses the mtasts_policy subroutine and returns the MTA-STS policy.  If the policy is testing continue with this router.
-  condition = ${if eq{${perl{mtasts_policy}{$domain}{$header_TLS-Report-Submitter:}}}{testing}}
+  condition = ${if eq{${perl{mtasts_policy}{$domain}{MTASTS_SUBMITTER}}}{testing}}
   domains = ! +local_domains
 # Push the email to the remote_smtp_mtasts_testing transport
   transport = remote_smtp_mtasts_testing
@@ -138,7 +143,7 @@ redirect_mtasts_fail:
   debug_print = "R: redirect-mtasts-failure for $local_part@$domain $address_data"
   driver = redirect
 # This condition uses the mtasts_policy subroutine and returns the MTA-STS policy.  If the policy is fail continue with this router.
-  condition = ${if eq{${perl{mtasts_policy}{$domain}{$header_TLS-Report-Submitter:}}}{fail}}
+  condition = ${if eq{${perl{mtasts_policy}{$domain}{MTASTS_SUBMITTER}}}{fail}}
   domains = ! +local_domains
 # Per RFC 8461 defer for another attempt later.  Hopefully the receiving agency will fix their MTA-STS.
   allow_defer
