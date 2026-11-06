@@ -21,8 +21,11 @@ sub _mtasts_debug($);
 sub _mtasts_warning($);
 sub _mtasts_sts_query($);
 sub _mtasts_sts_load_policy($);
+sub _mtasts_db_init();
+sub _mtasts_db_open($);
+sub _mtasts_db_lock($$);
 sub _mtasts_db_query($$);
-sub _mtasts_db_save($$$$);
+sub _mtasts_db_save($$$);
 
 
 # main API functions
@@ -102,7 +105,7 @@ sub mtasts_policy(@) {
     };
 
     # and save in DB
-    _mtasts_db_save($DB, $domain, $STS, $now);
+    _mtasts_db_save($domain, $STS, $now);
 
     # Loaded the DB with a proper policy.  Send the current mode and have a nice day.
     _mtasts_debug('mtasts_policy('.$domain.'): returning "'.$STS->{mode}.'" (after updating DB)');
@@ -269,55 +272,131 @@ sub _mtasts_sts_load_policy($) {
     return $STS;
 }
 
-sub _mtasts_lmdb_init() {
-    # load LMDB_File instead of globally in case not needed
-    # to avoid errors if not installed
-    use LMDB_File qw(:flags :cursor_op);
+# Ensure the LMDB directory exists.
+# Safe to call even if the directory already exists.
+# Routers run as root and transports as the exim user, whichever creates the
+# directory and the DB (see _mtasts_db_open()): both need access, through exim's group.
+sub _mtasts_db_init() {
     use File::Path qw(make_path);
+
     my $path = $MTASTS_LMDB_PATH;
 
-    # create the path hirachy, handle any error
-    make_path($path, { error => \my $err });
-    # error handling as described in LMDB_File documentation
+    make_path($path, { mode => 0770, error => \my $err });
     if ($err && @$err) {
         for my $diag (@$err) {
             my ($file, $message) = %$diag;
             if ($file eq '') {
-                _mtasts_warning('_mtasts_lmdb_init(): general error: '.$message);
+                _mtasts_warning('_mtasts_db_init(): general error: '.$message);
             } else {
-                _mtasts_warning('_mtasts_lmdb_init(): problem unlinking '.$file.': '.$message);
+                _mtasts_warning('_mtasts_db_init(): problem unlinking '.$file.': '.$message);
             }
         }
-        return undef;
+        return 0;
     }
+    return 1;
+}
+
+# Open a fresh LMDB env with MDB_NOLOCK.
+# Each call returns a new env object; caller must ensure it goes out of scope
+# (or is explicitly undef'd) to close it promptly.
+# For write access, pass a true value as argument; caller must then hold the
+# lock from _mtasts_db_lock() before calling this function.
+sub _mtasts_db_open($) {
+    my ($write) = @_;
+
+    use LMDB_File qw(:flags :cursor_op);
+
+    my $path = $MTASTS_LMDB_PATH;
+    my $flags = MDB_NOLOCK;
 
     my $env;
     eval {
-        $env = LMDB::Env->new($path, { mapsize => 100 * 1024 * 1024 * 1024 });
+        $env = LMDB::Env->new($path, {
+            mapsize => 100 * 1024 * 1024 * 1024,
+            flags   => $flags,
+            mode    => 0660,
+        });
     } or do {
-        _mtasts_warning('_mtasts_lmdb_init(): could not create LMDB env: '.$LMDB_file::last_err);
+        _mtasts_warning('_mtasts_db_open(): could not create LMDB env: '.$LMDB_File::last_err);
         return undef;
     };
 
-    my $transaction = $env->BeginTxn();
-    if (! defined($transaction)) {
-        _mtasts_warning('_mtasts_lmdb_init(): could not get LMDB transaction: '.$LMDB_file::last_err);
-        return undef;
+    if ($write) {
+        # ensure the named DB exists (MDB_CREATE only valid in a rw txn)
+        my $txn = $env->BeginTxn();
+        if (! defined($txn)) {
+            _mtasts_warning('_mtasts_db_open(): could not begin init transaction: '.$LMDB_File::last_err);
+            return undef;
+        }
+        $txn->OpenDB({ flags => MDB_CREATE });
+        $txn->commit();
     }
 
-    return $transaction->OpenDB({ flags => MDB_CREATE });
+    return $env;
+}
+
+# Take the lock MDB_NOLOCK leaves to us: LMDB requires that no reader uses an
+# old transaction while a writer is active. Readers share it (LOCK_SH), a
+# writer holds it alone (LOCK_EX). This is fork-safe and process-safe.
+# Waits for $wait seconds at most, so that a stuck process cannot stop all mail.
+# Returns the file handle holding the lock, the lock is released when it goes
+# out of scope. Returns undef on error.
+sub _mtasts_db_lock($$) {
+    my ($mode, $wait) = @_;
+
+    use Fcntl qw(:flock O_RDONLY O_CREAT);
+
+    my $lockfile = $MTASTS_LMDB_PATH.'/write.lock';
+
+    # flock needs no write access: routers (root) and transports (exim user)
+    # can both use the file, whichever created it
+    sysopen(my $lockfh, $lockfile, O_RDONLY|O_CREAT) or do {
+        _mtasts_warning('_mtasts_db_lock(): could not open lock file '.$lockfile.': '.$!);
+        return undef;
+    };
+
+    my $deadline = time() + $wait;
+    until (flock($lockfh, $mode | LOCK_NB)) {
+        if (! ($!{EWOULDBLOCK} || $!{EINTR}) || (time() >= $deadline)) {
+            _mtasts_warning('_mtasts_db_lock(): could not acquire lock: '.$!);
+            return undef;
+        }
+        select(undef, undef, undef, 0.01);
+    }
+
+    return $lockfh;
 }
 
 sub _mtasts_db_query($$) {
     my ($domain, $now) = @_;
 
     my %DB;
-    my $db = _mtasts_lmdb_init();
-    if (! defined($db)) {
-        _mtasts_warning('_mtasts_db_query(): _mtasts_lmdb_init() failed');
+
+    # no DB yet means nothing cached: _mtasts_db_save() creates it on the first write
+    # (-s: an empty file is being created, opening it would write to it)
+    if (! -s "$MTASTS_LMDB_PATH/data.mdb") {
+        $DB{valid} = 0;
+        return \%DB;
+    }
+
+    # open a fresh env for this read
+    my $env = _mtasts_db_open(0);
+    if (! defined($env)) {
+        _mtasts_warning('_mtasts_db_query(): _mtasts_db_open() failed');
         return undef;
     }
-    $DB{db} = $db;
+
+    # shared lock for the transaction only, not to keep writers waiting at peak load;
+    # on failure _mtasts_db_lock() warns and we read anyway: a short unlocked read is
+    # better than deferring all mail
+    my $lockfh = _mtasts_db_lock(LOCK_SH, 5);
+
+    my $txn = $env->BeginTxn(MDB_RDONLY);
+    if (! defined($txn)) {
+        _mtasts_warning('_mtasts_db_query(): could not begin read-only transaction: '.$LMDB_File::last_err);
+        return undef;
+    }
+    my $db = $txn->OpenDB();
 
     $DB{valid} = 0;
     eval {
@@ -337,21 +416,53 @@ sub _mtasts_db_query($$) {
     } or do {
         $DB{valid} = 0;
     };
+    eval { $txn->abort() };
+    undef($lockfh);
+    # $env goes out of scope here, closing the environment
 
     return \%DB;
 }
 
-sub _mtasts_db_save($$$$) {
-    my ($DB, $domain, $STS, $now) = @_;
+sub _mtasts_db_save($$$) {
+    my ($domain, $STS, $now) = @_;
 
-    $DB->{db}->put($domain.':expire', $STS->{max_age}+$now,  MDB_NODUPDATA);
-    $DB->{db}->put($domain.':id',     $STS->{id},            MDB_NODUPDATA);
-    $DB->{db}->put($domain.':mode',   $STS->{mode},          MDB_NODUPDATA);
-    $DB->{db}->put($domain.':report', $STS->{rua},           MDB_NODUPDATA);
-    $DB->{db}->put($domain.':policy', $STS->{policy},        MDB_NODUPDATA);
+    # ensure the directory exists first: the lock file lives in it
+    if (! _mtasts_db_init()) {
+        _mtasts_warning('_mtasts_db_save(): _mtasts_db_init() failed');
+        return;
+    }
+
+    # exclusive lock until we return. Readers can keep it busy at peak load and
+    # giving up defers the mail, so wait much longer than they do
+    my $lockfh = _mtasts_db_lock(LOCK_EX, 60);
+    if (! defined($lockfh)) {
+        _mtasts_warning('_mtasts_db_save(): _mtasts_db_lock() failed');
+        return;
+    }
+
+    my $env = _mtasts_db_open(1);
+    if (! defined($env)) {
+        _mtasts_warning('_mtasts_db_save(): _mtasts_db_open() failed');
+        return;
+    }
+
+    # use a read-write transaction for writes
+    my $txn = $env->BeginTxn();
+    if (! defined($txn)) {
+        _mtasts_warning('_mtasts_db_save(): could not begin read-write transaction: '.$LMDB_File::last_err);
+        return;
+    }
+    my $db = $txn->OpenDB();
+
+    $db->put($domain.':expire', $STS->{max_age}+$now,  MDB_NODUPDATA);
+    $db->put($domain.':id',     $STS->{id},            MDB_NODUPDATA);
+    $db->put($domain.':mode',   $STS->{mode},          MDB_NODUPDATA);
+    $db->put($domain.':report', $STS->{rua},           MDB_NODUPDATA);
+    $db->put($domain.':policy', $STS->{policy},        MDB_NODUPDATA);
     # LMDB only stores strings, join MX array by ':'
     my $mx = join(':', @{$STS->{mx}});
-    $DB->{db}->put($domain.':mx', $mx, MDB_NODUPDATA);
+    $db->put($domain.':mx', $mx, MDB_NODUPDATA);
 
-    $DB->{db}->Txn->commit;
+    $txn->commit();
+    # $lockfh and $env go out of scope here, releasing the lock and closing the environment
 }

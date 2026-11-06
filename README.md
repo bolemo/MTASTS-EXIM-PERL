@@ -69,6 +69,8 @@ The data structue is as follows:
 - domainname.tld:policy
   - The policy found bt Mail::STS as a string.
 
+The database is opened with `MDB_NOLOCK`, as LMDB's own locks do not survive the forks of Exim. The file `write.lock` next to the database replaces them: readers hold a shared `flock` on it, a writer an exclusive one. Any other software accessing the database must do the same, as `report.py`, `lmdb-dump.py` and `lmdb-del-key.py` do.
+
 To forget a cached policy, for example for a domain that removed its MTA-STS record and moved its MX hosts before the policy expired: `lmdb-del-key.py <path-to-database> domainname.tld:expire`.
 
 
