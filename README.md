@@ -35,6 +35,8 @@ There are three different subroutines:
   
   If the Domain name is in the database, the expiration of the info will be checked.  If the info has expired, it will attempt to get a new record and put the data into the database.
 
+  If the MTA-STS dns or http record cannot be read but the info in the database has not expired, the database wins, see [Section 3.3 of RFC 8461](https://datatracker.ietf.org/doc/html/rfc8461#section-3.3).
+
   The second argument is optional and thus can be empty or omitted. When given, it should be the value of the `TLS-Report-Submitter` header of the mail to be delivered. That way, the function can decide wether to use policy "none" for sending TLS reports, see [Section 5.3.1 of RFC 8460](https://datatracker.ietf.org/doc/html/rfc8460#section-5.3.1) .
 
 #### mtasts\_valid\_mx (DomainName) (HostName)
@@ -66,6 +68,8 @@ The data structue is as follows:
   - This is the contact URL for the RFC 8460 TLSRPT.  When it comes to the MTA-STS RFC 8461, this is only required if the mode/policy is set to "testing" and the sending server sends regular reports. At this time, the mailto: gets stripped and this only contains an email address.
 - domainname.tld:policy
   - The policy found bt Mail::STS as a string.
+
+To forget a cached policy, for example for a domain that removed its MTA-STS record and moved its MX hosts before the policy expired: `lmdb-del-key.py <path-to-database> domainname.tld:expire`.
 
 
 ### A few notes:
