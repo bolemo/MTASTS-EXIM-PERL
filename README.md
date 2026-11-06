@@ -147,6 +147,9 @@ redirect_mtasts_fail:
 remote_smtp_mtasts_enforce:
   debug_print = "T: remote_smtp_mtasts_enforce for $local_part@$domain"
   driver = smtp
+# $domain, used below, is only set when a delivery handles a single domain.
+# Without this, a mail to two domains sharing the same MX hosts is deferred.
+  multi_domain = false
 # Do a full cert check on the MTA-STS mx host names
   tls_verify_cert_hostnames = ${perl{mtasts_mx_hostlist}{$domain}}
   tls_tempfail_tryclear = false
