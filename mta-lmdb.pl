@@ -66,7 +66,7 @@ sub mtasts_policy(@) {
     }
 
     # If there is a Policy in the DB and the MTA-STS version in the DNS is valid, check if the version numbers are the same.
-    if ($DB->{valid} && $STS->{id} && ($DB->{id} eq $STS->{id})) {
+    if ($DB->{valid} && defined($STS->{id}) && ($DB->{id} eq $STS->{id})) {
         # Policy in the DB is good and it hasn't expired.
         # Current policy found in the DB. Send the current mode.
         _mtasts_debug('mtasts_policy('.$domain.'): returning "'.$DB->{mode}.'" from DB');
@@ -74,7 +74,7 @@ sub mtasts_policy(@) {
     }
 
     # If not, check if there is a STS id
-    if (! $STS->{id}) {
+    if (! defined($STS->{id})) {
         # No Policy in the DB and there is no MTA-STS record in the DNS.
         _mtasts_debug('mtasts_policy('.$domain.'): returning "none": No Policy in the DB and there is no MTA-STS record in the DNS');
         return 'none';
@@ -222,12 +222,11 @@ sub _mtasts_sts_query($) {
         return \%STS;
     }
 
-    # analyse STS
+    # analyse STS: without a usable record, id stays undefined ("0" is a valid id)
     eval {
         $STS{domain}->sts;
-        $STS{id} = $STS{domain}->sts->id;
-    } or do {
-        $STS{id} = 0;
+        my $id = $STS{domain}->sts->id;
+        $STS{id} = $id if (length($id));
     };
     eval {
         $STS{rua} = $STS{domain}->tlsrpt->rua;
