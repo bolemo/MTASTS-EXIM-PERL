@@ -585,14 +585,11 @@ def redis_connect(write=False):
     debug(f'servers={servers}')
     for server in servers:
         debug(f'redis.Redis(host={server},decode_responses=True)')
-        conn = redis.Redis(host=server, decode_responses=True)
+        conn = redis.Redis(host=server, decode_responses=True, password=args.redis_auth)
         if not conn:
             debug(f'redis.Redis(host={server},decode_responses=True) FAILED, continuing')
             continue
         debug(f'redis.Redis(host={server},decode_responses=True) CONNECTED')
-        if args.redis_auth:
-            conn.auth(args.redis_auth)
-        debug(f'redis.Redis(host={server},decode_responses=True) AUTHENTICATED')
         return conn
     raise ConnectionError(
         f'Failed to connect to redis server {servers} ({"read/write" if write else "read-only"})'
