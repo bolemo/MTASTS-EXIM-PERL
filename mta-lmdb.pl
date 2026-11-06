@@ -95,15 +95,10 @@ sub mtasts_policy(@) {
             _mtasts_debug('mtasts_policy('.$domain.'): returning "'.$DB->{mode}.'" from DB: could not load new policy but cached policy still valid');
             return $DB->{mode};
         }
-        if ($STS->{policy_fail} eq 'none') {
-            _mtasts_debug('mtasts_policy('.$domain.'): returning "none": good MTA-STS DNS entry but no policy available from cache or http');
-        } elsif ($STS->{policy_fail} eq 'fail') {
-            _mtasts_debug('mtasts_policy('.$domain.'): returning "fail": badly formatted policy');
-        } else {
-            _mtasts_debug('mtasts_policy('.$domain.'): returning "fail": unknown result from _mtasts_sts_load_policy(): policy_fail='.$STS->{policy_fail});
-            return 'fail';
-        }
-        return $STS->{policy_fail};
+        # RFC 8461 section 3.3: if no policy can be fetched "for any reason" and none is
+        # cached, delivery MUST continue as though the domain has not implemented MTA-STS
+        _mtasts_debug('mtasts_policy('.$domain.'): returning "none": good MTA-STS DNS entry but nothing in cache and '.$STS->{policy_fail});
+        return 'none';
     };
 
     # and save in DB
@@ -252,7 +247,7 @@ sub _mtasts_sts_load_policy($) {
     eval {
         $policy = $STS->{domain}->policy;
     } or do {
-        $STS->{policy_fail} = 'none';
+        $STS->{policy_fail} = 'no policy available from http';
         return $STS;
     };
 
@@ -261,9 +256,14 @@ sub _mtasts_sts_load_policy($) {
         $STS->{mode}    = $policy->mode;
         $STS->{max_age} = $policy->max_age;
         $STS->{policy}  = $policy->as_string;
+        # Mail::STS does not check that these are present: without MX hosts, mode
+        # enforce would refuse all of them until the policy expires
+        defined($STS->{max_age}) or die("no max_age\n");
+        (@{$STS->{mx}} || ($STS->{mode} eq 'none')) or die("no mx\n");
+        1;
     } or do {
         # Found some aspects of a policy, but it is badly formatted
-        $STS->{policy_fail} = 'fail';
+        $STS->{policy_fail} = 'badly formatted policy: '.$@;
     };
 
     return $STS;
