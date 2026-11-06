@@ -366,8 +366,8 @@ def parse_exim_errors(lines):
     # 2023-03-10 17:58:55 1paeYC-001MTh-0L == measurement@mail-mtasts-rn-plain.measurement.email-security-scans.org R=dnslookup T=remote_smtp_mtasts_enforce defer (-38) H=plaintext.measurement.email-security-scans.org [2a06:d1c0:dead:3::83] I=[2a06:d1c0:dead:2::182] DT=0s: a TLS session is required, but the server did not offer TLS support
     # 2026-02-02 04:49:32 1vmkcr-00000003gVc-3F74 == dmarc-rpt@domeneshop.no R=dnslookup T=remote_smtp defer (110): Connection timed out H=mx.domeneshop.no [194.63.252.21] I=[139.19.205.225] DT=2m15s
     # 2026-02-16 03:20:47 1vroCe-0000000EHVq-3NEg => 2fincamt@tls.au.dmarcian.com P=<smtp-tls-reports@mpi-klsb.mpg.de> R=dnslookup T=remote_smtp S=2991 H=tls.au.dmarcian.com [34.116.117.45] I=[139.19.205.192] X=TLS1.3:ECDHE_SECP256R1__RSA_PSS_RSAE_SHA256__AES_256_GCM:256 CV=yes DN="CN=au-app.au.dmarcian.com" C="250 2.0.0 Ok: queued as 3EB0D28D9E4" QT=1m35s DT=6s Policy-Error: Host "tls.au.dmarcian.com" must not be used to deliver to domain "tls.au.dmarcian.com" according to policy "sts"
-    error_re = r'^.+ == (?P<email>\S+) (.+ H=(?P<mxhost>\S+) \[(?P<mxip>\S+)\] I=\[(?P<lip>\S+)\].*?: (?P<error>.+)|.+: (?P<error_alt>.+) H=(?P<mxhost_alt>\S+) \[(?P<mxip_alt>\S+)\] I=\[(?P<lip_alt>\S+)\] .+)$'
-    policy_error_re = r'.+ [=-]> (?P<email>\S+) .+ H=(?P<mxhost>\S+) \[(?P<mxip>\S+)\] I=\[(?P<lip>\S+)\].* Policy-Error: (?P<error>.+)$'
+    error_re = r'^.+ == (?P<email>\S+) (.+ H=(?P<mxhost>\S+) \[(?P<mxip>\S+)\]( I=\[(?P<lip>\S+)\])?.*?: (?P<error>.+)|.+: (?P<error_alt>.+) H=(?P<mxhost_alt>\S+) \[(?P<mxip_alt>\S+)\]( I=\[(?P<lip_alt>\S+)\])? .+)$'
+    policy_error_re = r'.+ [=-]> (?P<email>\S+) .+ H=(?P<mxhost>\S+) \[(?P<mxip>\S+)\]( I=\[(?P<lip>\S+)\])?.* Policy-Error: (?P<error>.+)$'
     # pylint: enable=line-too-long
     for curline in lines:
         error_match = re.match(error_re, curline)
@@ -386,6 +386,12 @@ def parse_exim_errors(lines):
         if not error_match and not policy_error_match:
             warn(f'Failed to match error line against "{error_re}":\n{curline}')
             continue
+        if f_lip is None:
+            if args.sending_mta_ip:
+                f_lip = args.sending_mta_ip
+            else:
+                warn(f'sending-mta-ip not found in log line and --sending-mta-ip not set, using empty string:\n{curline}')
+                f_lip = ''
         result_type, reason = exim_error2tlsrpt_error(f_error)
         if result_type is None:
             continue
@@ -670,6 +676,7 @@ parser.add_argument('--org-name',   type=str, help='organization name in reports
 parser.add_argument('--contact',    type=str, help='contact info in reports',             default=DEFAULT_CONTACT)
 parser.add_argument('--date',       type=str, help='ISO date of report (def: yesterday)', default=str(yesterday))
 parser.add_argument('--bcc',        type=str, help='BCC for send mails, comma seperated')
+parser.add_argument('--sending-mta-ip', type=str, help='fallback sending MTA IP if I=[...] not found in log lines', default=None)
 parser.add_argument('--only-domains',   type=str, help='only handle these domains, comma seperated', default=','.join(default_only_domains))
 parser.add_argument('--ignore-domains', type=str, help='ignore these domains, comma seperated',      default=','.join(default_ignore_domains))
 parser.add_argument('--ignore-recipients', type=str, help='ignore rua recipients, comma seperated',      default=','.join(default_ignore_recipients))
