@@ -148,7 +148,7 @@ remote_smtp_mtasts_enforce:
   debug_print = "T: remote_smtp_mtasts_enforce for $local_part@$domain"
   driver = smtp
 # Do a full cert check on the MTA-STS mx host names
-  tls_verify_cert_hostnames = {${perl{mtasts_mx_hostlist}{$domain}}}
+  tls_verify_cert_hostnames = ${perl{mtasts_mx_hostlist}{$domain}}
   tls_tempfail_tryclear = false
 # Require TLS: refuse delivery if the remote server does not advertise STARTTLS.
 # Without this, Exim silently falls back to plaintext even in enforce mode.
