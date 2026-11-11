@@ -353,3 +353,5 @@ day a few hours after **midnight UTC**.
 
  - Thanks to Tobias Fiebig for providing very useful input and test
    infrastructure: https://email-security-scans.org/
+ - Thanks to Gabriel ROUSSEAU for contributing multiple fixes and
+   new features.
